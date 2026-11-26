@@ -1,0 +1,85 @@
+name: Build & Release DaoRong_tool (Windows .exe)
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - '*.py'
+      - 'dragons_db.json'
+      - 'config.json'
+      - 'requirements.txt'
+      - 'templates/ui/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pyarmor
+
+      - name: Read version from updater.py
+        id: ver
+        shell: pwsh
+        run: |
+          $v = python -c "import updater; print(updater.CURRENT_VERSION)"
+          echo "version=$v" >> $env:GITHUB_OUTPUT
+          echo "Detected version: $v"
+
+      - name: Build DaoRong_tool.exe (Obfuscated + Optimized)
+        shell: pwsh
+        run: |
+          if (Test-Path build_obf) { Remove-Item -Recurse -Force build_obf }
+          pyarmor gen -O build_obf main.py bot_engine.py vision.py actions.py capture_tool.py ocr_engine.py updater.py adb_controller.py smart_ai.py
+          if ($LASTEXITCODE -eq 0) {
+            Copy-Item app_icon.ico build_obf\app_icon.ico -Force
+            Push-Location build_obf
+            python -m PyInstaller --noconfirm --onedir --windowed --uac-admin --name DaoRong_tool --icon=app_icon.ico --distpath ..\dist --workpath ..\build --add-data "pyarmor_runtime_000000;pyarmor_runtime_000000" --collect-all customtkinter --collect-all rapidocr_onnxruntime --exclude-module matplotlib --exclude-module scipy --exclude-module pandas --exclude-module pytest --exclude-module IPython --exclude-module PyQt5 --exclude-module PySide6 main.py
+            Pop-Location
+          } else {
+            python -m PyInstaller --noconfirm --onedir --windowed --uac-admin --name DaoRong_tool --icon=app_icon.ico --collect-all customtkinter --collect-all rapidocr_onnxruntime --exclude-module matplotlib --exclude-module scipy --exclude-module pandas --exclude-module pytest --exclude-module IPython --exclude-module PyQt5 --exclude-module PySide6 main.py
+          }
+          Copy-Item config.json dist\DaoRong_tool\config.json -Force
+          Copy-Item dragons_db.json dist\DaoRong_tool\dragons_db.json -Force
+          Copy-Item app_icon.ico dist\DaoRong_tool\app_icon.ico -Force
+          Copy-Item app_icon.png dist\DaoRong_tool\app_icon.png -Force
+          Copy-Item -Recurse -Force templates dist\DaoRong_tool\templates
+          $clsModel = "dist\DaoRong_tool\_internal\rapidocr_onnxruntime\models\ch_ppocr_mobile_v2.0_cls_infer.onnx"
+          if (Test-Path $clsModel) { Remove-Item -Force $clsModel }
+
+      - name: Package Release ZIP & version.json
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Compress-Archive -Path "dist\DaoRong_tool\*" -DestinationPath "release\DaoRong_tool_Update.zip" -Force
+          $v = "${{ steps.ver.outputs.version }}"
+          $repo = "${{ github.repository }}"
+          $json = @{
+            version = $v
+            download_url = "https://github.com/$repo/releases/latest/download/DaoRong_tool_Update.zip"
+            notes = "DaoRong_tool v$v (Auto-built via GitHub Actions)"
+          } | ConvertTo-Json -Depth 3
+          [System.IO.File]::WriteAllText("$PWD\release\version.json", $json, [System.Text.UTF8Encoding]::new($false))
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: DaoRong_tool v${{ steps.ver.outputs.version }}
+          body: "Bản build tự động DaoRong_tool v${{ steps.ver.outputs.version }}. Tải file DaoRong_tool_Update.zip giải nén để chạy hoặc bấm nút Cập nhật ngay trong app."
+          files: |
+            release/DaoRong_tool_Update.zip
+            release/version.json
