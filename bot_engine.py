@@ -103,6 +103,8 @@ class DaoRongBot:
         self.sell_dir = self.templates_dir / "sell"
         self.bless_dir = self.templates_dir / "bless"
         self.dust_targets_dir = self.templates_dir / "dust_targets"
+        self.protect_dust_dir = self.templates_dir / "protect_dust"
+        self.protect_dust_dir.mkdir(parents=True, exist_ok=True)
 
         self.config = config
         self.log = log_callback
@@ -156,6 +158,8 @@ class DaoRongBot:
         self.rare_saver = RareMomentSaver(self.base_dir / "lich_su_rong_quy")
         self.dataset_collector = TrainingDatasetCollector(self.base_dir / "ai_dataset")
         self._next_break_ts = 0.0
+        # Sổ Tay Rồng Vừa Lai: lưu {(Độ hiếm, Số sao): số con vừa cất chờ hóa bụi} -> 0% hóa bụi nhầm rồng cũ!
+        self._session_dust_ledger: Dict[Tuple[str, int], int] = {}
         self._wd_last_frame = None
         self._wd_last_change_ts = 0.0
 
@@ -510,11 +514,13 @@ class DaoRongBot:
 
     def _recover_from_map_or_subscreen(self, max_clicks: int = 4) -> bool:
         """
-        Nếu lỡ bấm nhầm vào Bản Đồ (Map) hoặc màn hình phụ (mất mũi tên > <):
-        tự bấm nút Về Đảo (btn_home_island.png) cho đến khi thấy lại mũi tên chuyển đảo > < để dò về Đảo Trứng!
+        Nếu lỡ bấm nhầm vào Bản Đồ (World Map) hoặc màn hình phụ (mất mũi tên > <):
+        tự bấm nút Về Đảo (btn_home_worldmap.png / btn_home_island.png) cho đến khi thấy lại mũi tên > <.
         """
-        home_p = self._ui("btn_home_island.png")
-        if not home_p.is_file():
+        home_candidates = [
+            p for p in (self._ui("btn_home_worldmap.png"), self._ui("btn_home_island.png")) if p.is_file()
+        ]
+        if not home_candidates:
             return False
         recovered = False
         for attempt in range(1, max_clicks + 1):
@@ -525,10 +531,15 @@ class DaoRongBot:
                 if recovered:
                     self.log("🏠 Đã thoát Map và thấy lại mũi tên chuyển đảo > < -> Dò về Đảo Trứng!")
                 return recovered
-            mh = self.vision.find_template(home_p, threshold=0.72, screen_bgr=screen, rect=rect)
-            if mh.found:
+            mh = None
+            for hp in home_candidates:
+                res_h = self.vision.find_template(hp, threshold=0.72, screen_bgr=screen, rect=rect)
+                if res_h.found:
+                    mh = res_h
+                    break
+            if mh is not None and mh.found:
                 self.log(f"🏠 Phát hiện đang lạc vào Map / màn hình phụ -> Bấm nút Về Đảo lần {attempt}/{max_clicks}.")
-                self.input.click(mh.x, mh.y, post_delay=0.85 * self._spd, stop_check=self.should_stop)
+                self.input.click(mh.x, mh.y, post_delay=0.65 * self._spd, stop_check=self.should_stop)
                 recovered = True
                 self.stats.recoveries += 1
                 self.on_stats(self.stats)
@@ -636,7 +647,7 @@ class DaoRongBot:
             else:
                 self.log(f"[TRỨNG] Click trứng tại {clicked_pos}.")
 
-            self.input.click(clicked_pos[0], clicked_pos[1], post_delay=0.55 * self._spd, stop_check=self.should_stop)
+            self.input.click(clicked_pos[0], clicked_pos[1], post_delay=0.30 * self._spd, stop_check=self.should_stop)
 
             # Kiểm tra đã mở đúng bảng Lai Rồng chưa
             chk_scr, chk_rect = self.vision.capture_window()
@@ -653,49 +664,138 @@ class DaoRongBot:
         return BotState.OPEN_BREED
 
     # ------------------------------------------------------------------
-    # Bước 2: Chọn 2 rồng bố mẹ cố định
+    # Bước 2: Chọn 2 rồng bố mẹ THÔNG MINH (Quét song song 2 rồng + Kiểm chứng 2 ô trên)
     # ------------------------------------------------------------------
-    def _find_and_select_parent(self, parent_filename: str, label: str) -> bool:
-        parent_path = self.parents_dir / parent_filename
-        if not parent_path.is_file():
-            self.log(f"[LỖI] Không tìm thấy ảnh mẫu {label}: {parent_path.name}")
-            return False
+    def _slot_is_empty(self, screen: np.ndarray, rect: WindowRect, slot_roi: List[float]) -> bool:
+        emp_p = self._ui("slot_parent_empty.png")
+        if emp_p.is_file():
+            m = self.vision.find_template(emp_p, threshold=0.68, roi_rel=slot_roi, screen_bgr=screen, rect=rect)
+            return m.found
+        return False
 
-        roi = self._drag_cfg("bottom_bar_roi", [0.15, 0.62, 0.58, 0.88])
-        start_rel = self._drag_cfg("bottom_drag_start", [0.48, 0.75])
-        end_rel = self._drag_cfg("bottom_drag_end", [0.22, 0.75])
-        max_scrolls = int(self._drag_cfg("max_parent_scrolls", 10))
-        drag_dur = float(self._drag_cfg("drag_duration", 0.38)) * self._spd
-        hold_end = float(self._drag_cfg("drag_hold_end", 0.12))
-        settle = self._timing("scroll_settle_delay", 0.50)
-        thr = self._conf("dragon", 0.75)
+    def _slot_matches_any_parent(
+        self, screen: np.ndarray, rect: WindowRect, slot_roi: List[float], parent_paths: List[Path]
+    ) -> float:
+        """So sánh hình rồng lõi (cắt bỏ viền/sao) của mẫu bố mẹ với rồng đang nằm trong ô bố mẹ phía trên."""
+        slot_crop, _, _ = self.vision.crop_roi(screen, rect, slot_roi)
+        if slot_crop is None or slot_crop.size == 0:
+            return 1.0
+        sh, sw = slot_crop.shape[:2]
+        best_sc = 0.0
+        for pp in parent_paths:
+            tpl = imread_unicode(pp)
+            if tpl is None or tpl.size == 0:
+                continue
+            th, tw = tpl.shape[:2]
+            # Lấy vùng lõi chứa thân rồng (bỏ viền & chữ độ hiếm/sao ở góc trên)
+            core = tpl[int(th * 0.22):int(th * 0.88), int(tw * 0.14):int(tw * 0.86)]
+            if core.shape[0] < 14 or core.shape[1] < 14:
+                continue
+            for sc in (0.85, 0.95, 1.05, 1.15, 1.25):
+                nw, nh = int(core.shape[1] * sc), int(core.shape[0] * sc)
+                if nw < 10 or nh < 10 or nw >= sw or nh >= sh:
+                    continue
+                r = cv2.matchTemplate(slot_crop, cv2.resize(core, (nw, nh)), cv2.TM_CCOEFF_NORMED)
+                val = float(r.max())
+                if val > best_sc:
+                    best_sc = val
+        return best_sc
 
-        res = self.vision.find_template(parent_path, threshold=thr, roi_rel=roi)
-        best_seen = res.score
-        if res.found:
-            self.log(f"[CHỌN RỒNG] Thấy {label} ({parent_path.stem}, score={res.score:.2f}) -> Click.")
-            self.input.click(res.x, res.y, stop_check=self.should_stop)
+    def _verify_and_fix_parent_slots(
+        self, p1_path: Path, p2_path: Path
+    ) -> Tuple[bool, bool]:
+        """
+        Kiểm chứng 2 ô bố mẹ phía trên sau khi bấm chọn:
+        - Nếu ô nào chọn NHẦM rồng lạ -> tự bấm vào ô đó để gỡ ra!
+        - Trả về (both_valid, had_wrong_dragon).
+        """
+        slot_left = self._drag_cfg("parent_slot_left_roi", [0.17, 0.25, 0.32, 0.52])
+        slot_right = self._drag_cfg("parent_slot_right_roi", [0.41, 0.25, 0.56, 0.52])
+        screen, rect = self.vision.capture_window()
+
+        left_empty = self._slot_is_empty(screen, rect, slot_left)
+        right_empty = self._slot_is_empty(screen, rect, slot_right)
+        if left_empty or right_empty:
+            return False, False
+
+        had_wrong = False
+        parents = [p1_path, p2_path]
+        for idx, (s_roi, center_rel) in enumerate(
+            [(slot_left, (0.245, 0.385)), (slot_right, (0.485, 0.385))], 1
+        ):
+            sc = self._slot_matches_any_parent(screen, rect, s_roi, parents)
+            self.log_tech(f"[KIỂM CHỨNG Ô {idx}] Độ khớp lõi rồng = {sc:.2f}")
+            if sc < 0.46:
+                had_wrong = True
+                cx, cy = rect.rel_to_abs(*self.vision.adjust_rel_point(*center_rel))
+                self.log(f"⚠️ [KIỂM CHỨNG] Ô bố mẹ {idx} bị chọn nhầm (khớp={sc:.2f}) -> Tự bấm gỡ ra chọn lại!")
+                self.input.click(cx, cy, post_delay=0.18 * self._spd, stop_check=self.should_stop)
+
+        return (not had_wrong), had_wrong
+
+    def _select_parents_dual_fast(self, p1_path: Path, p2_path: Path) -> bool:
+        """
+        Quét ĐỒNG THỜI cả 2 rồng bố mẹ trên từng khung hình:
+        - Mở rộng khung quét phủ trọn 4 thẻ rồng phía dưới (không còn cắt rồng bên phải).
+        - Kéo nhẹ từng nhịp ngắn (~1.5 thẻ/lần) nên không bao giờ lướt quá rồng.
+        - Thấy con nào (hoặc cả 2 con) trên cùng màn hình -> bấm chọn ngay lập tức!
+        """
+        roi = self._drag_cfg("bottom_bar_roi", [0.15, 0.62, 0.61, 0.89])
+        # Kéo ngắn ~18% chiều ngang (vừa qua ~1.5 ô rồng) thay vì kéo dài dễ trượt quá
+        start_rel = self._drag_cfg("bottom_drag_start", [0.47, 0.75])
+        end_rel = self._drag_cfg("bottom_drag_end", [0.29, 0.75])
+        max_scrolls = int(self._drag_cfg("max_parent_scrolls", 12))
+        drag_dur = min(0.32, float(self._drag_cfg("drag_duration", 0.30))) * self._spd
+        hold_end = float(self._drag_cfg("drag_hold_end", 0.08))
+        settle = min(0.28, self._timing("scroll_settle_delay", 0.24)) * self._spd
+        # Ngưỡng chặt >= 0.84 chống chọn nhầm rồng cùng màu!
+        thr = max(0.84, self._conf("dragon", 0.75))
+
+        need: List[Tuple[str, Path]] = [("Rồng 1", p1_path), ("Rồng 2", p2_path)]
+        best_seen: Dict[str, float] = {"Rồng 1": 0.0, "Rồng 2": 0.0}
+
+        def _try_pick_visible(scr: np.ndarray, rct: WindowRect) -> None:
+            nonlocal need
+            still_need: List[Tuple[str, Path]] = []
+            for label, pp in need:
+                res = self.vision.find_template(pp, threshold=thr, roi_rel=roi, screen_bgr=scr, rect=rct)
+                if res.score > best_seen[label]:
+                    best_seen[label] = res.score
+                if res.found:
+                    self.log(f"⚡ [CHỌN RỒNG] Thấy {label} ({pp.stem}, {res.score:.2f}) -> Click ngay.")
+                    self.input.click(res.x, res.y, post_delay=0.14 * self._spd, stop_check=self.should_stop)
+                else:
+                    still_need.append((label, pp))
+            need = still_need
+
+        # Kiểm tra ngay trên màn hình hiện tại (0ms kéo!)
+        scr0, rect0 = self.vision.capture_window()
+        _try_pick_visible(scr0, rect0)
+        if not need:
             return True
 
-        half = max(1, max_scrolls // 2)
+        half = max(3, max_scrolls // 2)
         directions = [
             ("kéo sang phải", start_rel, end_rel, half),
             ("kéo ngược sang trái", end_rel, start_rel, max_scrolls),
         ]
 
-        for dir_name, p1_rel, p2_rel, limit in directions:
+        prev_scr, prev_rect = scr0, rect0
+        for dir_name, p_from, p_to, limit in directions:
             stuck_count = 0
             for step in range(1, limit + 1):
+                if not need:
+                    return True
                 if not self.wait_if_paused():
                     return False
-                if self._check_bag_full():
+                if self._check_bag_full(prev_scr, prev_rect):
                     return False
 
-                before_scr, rect = self.vision.capture_window()
-                before_roi, _, _ = self.vision.crop_roi(before_scr, rect, roi)
-                x1, y1 = rect.rel_to_abs(p1_rel[0], p1_rel[1])
-                x2, y2 = rect.rel_to_abs(p2_rel[0], p2_rel[1])
-                self.log(f"[THANH RỒNG] {dir_name} ({step}/{limit}) tìm {label}...")
+                before_roi, _, _ = self.vision.crop_roi(prev_scr, prev_rect, roi)
+                x1, y1 = prev_rect.rel_to_abs(*self.vision.adjust_rel_point(p_from[0], p_from[1]))
+                x2, y2 = prev_rect.rel_to_abs(*self.vision.adjust_rel_point(p_to[0], p_to[1]))
+                rem_lbl = " & ".join(lb for lb, _ in need)
+                self.log_tech(f"[THANH RỒNG] {dir_name} ({step}/{limit}) tìm {rem_lbl}...")
                 self.input.smooth_drag(
                     x1, y1, x2, y2, duration=drag_dur, hold_end=hold_end, stop_check=self.should_stop
                 )
@@ -703,14 +803,9 @@ class DaoRongBot:
 
                 after_scr, after_rect = self.vision.capture_window()
                 after_roi, _, _ = self.vision.crop_roi(after_scr, after_rect, roi)
-                res = self.vision.find_template(
-                    parent_path, threshold=thr, roi_rel=roi, screen_bgr=after_scr, rect=after_rect
-                )
-                if res.score > best_seen:
-                    best_seen = res.score
-                if res.found:
-                    self.log(f"[CHỌN RỒNG] Thấy {label} (score={res.score:.2f}) -> Click.")
-                    self.input.click(res.x, res.y, stop_check=self.should_stop)
+                _try_pick_visible(after_scr, after_rect)
+                prev_scr, prev_rect = after_scr, after_rect
+                if not need:
                     return True
 
                 if compute_frame_diff(before_roi, after_roi) < 2.2:
@@ -720,9 +815,8 @@ class DaoRongBot:
                 else:
                     stuck_count = 0
 
-        self.log(
-            f"[CẢNH BÁO] Không thấy {label} ({parent_path.stem}) (max={best_seen:.2f} / {thr:.2f})."
-        )
+        for label, pp in need:
+            self.log(f"[CẢNH BÁO] Chưa thấy {label} ({pp.stem}) (max={best_seen[label]:.2f} / {thr:.2f}).")
         return False
 
     def _step_select_parents(self) -> BotState:
@@ -737,19 +831,35 @@ class DaoRongBot:
             self.stop()
             return BotState.OPEN_BREED
 
-        if not self._find_and_select_parent(p1, "Rồng 1"):
-            return BotState.EXIT_BREED_TO_DUST if self._check_bag_full() else BotState.OPEN_BREED
-        if not self._find_and_select_parent(p2, "Rồng 2"):
-            return BotState.EXIT_BREED_TO_DUST if self._check_bag_full() else BotState.OPEN_BREED
+        p1_path = self.parents_dir / p1
+        p2_path = self.parents_dir / p2
+        if not p1_path.is_file() or not p2_path.is_file():
+            self.log(f"[LỖI] Thiếu ảnh mẫu rồng bố mẹ trong templates/parents/ ({p1}, {p2})")
+            self.stop()
+            return BotState.OPEN_BREED
+
+        # Thử tối đa 2 vòng nếu vòng 1 phát hiện chọn nhầm và tự gỡ ra
+        for attempt in range(1, 3):
+            if not self._select_parents_dual_fast(p1_path, p2_path):
+                return BotState.EXIT_BREED_TO_DUST if self._check_bag_full() else BotState.OPEN_BREED
+            ok_slots, had_wrong = self._verify_and_fix_parent_slots(p1_path, p2_path)
+            if ok_slots:
+                break
+            if attempt == 2:
+                self.log("[PHỤC HỒI] Không xác minh được đủ 2 ô bố mẹ -> Mở lại bảng Lai.")
+                return BotState.OPEN_BREED
 
         sb_path = self._ui("btn_start_breed.png")
         if sb_path.is_file():
+            sb_roi = self.calibrator.get_roi(self._mode_key, "btn_start_breed.png") or [0.38, 0.48, 0.58, 0.65]
             res = self.vision.wait_for_template(
-                sb_path, timeout=2.5, threshold=self._conf("button", 0.76), stop_check=self.should_stop
+                sb_path, timeout=2.0, threshold=self._conf("button", 0.76), roi_rel=sb_roi, stop_check=self.should_stop
             )
+            if not res.found:
+                res = self.vision.find_template(sb_path, threshold=self._conf("button", 0.76))
             if res.found:
-                self.log(f"[LAI RỒNG] Click 'Lai Rồng' ({res.x}, {res.y}).")
-                self.input.click(res.x, res.y, post_delay=0.15, stop_check=self.should_stop)
+                self.log_tech(f"[LAI RỒNG] Click 'Lai Rồng' ({res.x}, {res.y}).")
+                self.input.click(res.x, res.y, post_delay=0.10, stop_check=self.should_stop)
 
         self._consecutive_failures = 0
         return BotState.WAIT_BREED_RESULT
@@ -803,6 +913,8 @@ class DaoRongBot:
         btn_thr = self._conf("button", 0.76)
         deadline = time.monotonic() + timeout
         result_buttons = ["btn_keep.png", "btn_bless.png", "btn_sell.png"]
+        # Quét đúng dải nút kết quả thay vì quét toàn màn hình -> nhanh gấp ~12 lần!
+        btns_band_roi = self._drag_cfg("result_buttons_roi", [0.18, 0.44, 0.60, 0.68])
 
         while time.monotonic() < deadline:
             if not self.wait_if_paused():
@@ -816,11 +928,13 @@ class DaoRongBot:
             for bname in result_buttons:
                 bp = self._ui(bname)
                 if bp.is_file():
+                    b_roi = self.calibrator.get_roi(self._mode_key, bname) or btns_band_roi
                     m_btn = self.vision.find_template(
-                        bp, threshold=btn_thr, screen_bgr=screen, rect=rect
+                        bp, threshold=btn_thr, roi_rel=b_roi, screen_bgr=screen, rect=rect
                     )
                     if m_btn.found:
                         found_btns[bname] = (m_btn.x, m_btn.y)
+                        self.calibrator.record(self._mode_key, bname, m_btn.x, m_btn.y, rect)
 
             if len(found_btns) >= 2 or "btn_keep.png" in found_btns:
                 self._cached_result_btns = found_btns
@@ -829,16 +943,22 @@ class DaoRongBot:
                 self.on_stats(self.stats)
                 return BotState.CLASSIFY_AND_ACT
 
-            time.sleep(0.07)
+            time.sleep(0.035)
 
-        # Smart recovery: kiểm tra xem bảng lai có bị bấm trượt nút 'Lai Rồng' không
         self.log("[PHỤC HỒI] Chờ kết quả quá lâu -> Kiểm tra lại nút 'Lai Rồng' hoặc trạng thái bảng.")
         self.stats.recoveries += 1
         self.on_stats(self.stats)
         return BotState.OPEN_BREED
 
+    def _has_custom_result_templates(self) -> bool:
+        for d in (self.bless_dir, self.keep_dir, self.sell_dir):
+            if d.is_dir() and any(d.glob("*.png")):
+                return True
+        return False
+
     def _step_classify_and_act(self) -> BotState:
         self._set_state(BotState.CLASSIFY_AND_ACT)
+        t_start = time.perf_counter()
         if self._cached_result_frame is not None:
             screen, rect = self._cached_result_frame
             self._cached_result_frame = None
@@ -847,30 +967,18 @@ class DaoRongBot:
         if self._check_bag_full(screen, rect):
             return BotState.EXIT_BREED_TO_DUST
 
-        best_name_img, best_baby_img, top3 = self._classify_result_dragon(screen, rect)
-        if top3:
-            top_str = " | ".join(f"{m.name}[{m.category}]={m.score:.2f}" for m in top3)
-            self.log(f"[NHẬN DIỆN] Top ảnh: {top_str}")
-
         action = None
         self._last_identified = ("", "", None)
-        # ƯU TIÊN 1: Ảnh chụp dòng Tên+Sao (ten_...) - chính xác tuyệt đối trên nền tối tĩnh
-        if best_name_img is not None:
-            action = best_name_img.category
-            self.log(
-                f"[QUYẾT ĐỊNH - ẢNH TÊN] '{best_name_img.name}' -> [{action.upper()}] ({best_name_img.score:.2f})."
-            )
-
-        # ƯU TIÊN 2A: AI Bộ Nhớ Tự Học Vĩnh Viễn (2ms, lưu tối đa 150 mẫu <1MB) — luôn áp dụng luật MỚI NHẤT!
-        name_roi = self._drag_cfg("result_name_roi", [0.57, 0.292, 0.77, 0.342])
+        name_roi = self._drag_cfg("result_name_roi", [0.57, 0.285, 0.78, 0.348])
         res_key = f"{self._mode_key}_{rect.width}x{rect.height}"
         text_rules = self.config.get("dragon_text_rules", {})
         has_rules = any(bool(text_rules.get(k)) for k in ("bless", "keep", "sell"))
         name_crop = None
 
-        if action is None and has_rules and self.name_cache.count > 0:
+        # ƯU TIÊN 1 (SIÊU TỐC < 1.5ms): AI Bộ Nhớ Tự Học Vĩnh Viễn — KIỂM TRA TRƯỚC TIÊN, KHÔNG CHỜ QUÉT THƯ MỤC!
+        if has_rules and self.name_cache.count > 0:
             name_crop, _, _ = self.vision.crop_roi(screen, rect, name_roi)
-            mem_hit = self.name_cache.match(name_crop, res_key, threshold=0.94)
+            mem_hit = self.name_cache.match(name_crop, res_key, threshold=0.89)
             if mem_hit is not None:
                 c_name, c_rar, c_stars, c_sc = mem_hit
                 self._last_identified = (c_name, c_rar, c_stars)
@@ -878,10 +986,24 @@ class DaoRongBot:
                 tm_mem = self.text_matcher.match_text_against_rules(synth_txt, text_rules)
                 if tm_mem.found:
                     action = tm_mem.category
+                    dt_ms = (time.perf_counter() - t_start) * 1000.0
                     act_vn = {"bless": "Chúc phúc & Cất", "keep": "Cất túi", "sell": "Bán ngay"}[action]
                     st_str = f" ({c_stars}★)" if c_stars else ""
-                    self.log(f"⚡ Lai ra: {c_name}{st_str} [{c_rar}] → {act_vn} (nhớ nhanh)")
-                    self.log_tech(f"[AI CACHE] '{c_name}' score={c_sc:.2f} -> {action}")
+                    self.log(f"⚡ Lai ra: {c_name}{st_str} [{c_rar}] → {act_vn} ({dt_ms:.0f}ms)")
+                    self.log_tech(f"[AI CACHE HIT] '{c_name}' score={c_sc:.2f} ({dt_ms:.1f}ms) -> {action}")
+
+        # ƯU TIÊN 2: Ảnh mẫu tự chụp (chỉ quét nếu thư mục thực sự có ảnh .png!)
+        best_name_img, best_baby_img = None, None
+        if action is None and self._has_custom_result_templates():
+            best_name_img, best_baby_img, top3 = self._classify_result_dragon(screen, rect)
+            if top3:
+                top_str = " | ".join(f"{m.name}[{m.category}]={m.score:.2f}" for m in top3)
+                self.log_tech(f"[NHẬN DIỆN] Top ảnh: {top_str}")
+            if best_name_img is not None:
+                action = best_name_img.category
+                self.log(
+                    f"[QUYẾT ĐỊNH - ẢNH TÊN] '{best_name_img.name}' -> [{action.upper()}] ({best_name_img.score:.2f})."
+                )
 
         # ƯU TIÊN 2B: Đọc dòng Tên+Sao bằng OCR -> tự học vĩnh viễn vào PersistentNameCache!
         if action is None and has_rules and self.config.get("enable_text_ocr", True):
@@ -928,7 +1050,7 @@ class DaoRongBot:
         if action == "keep":
             cached_k = self._cached_result_btns.get("btn_keep.png")
             if cached_k is not None:
-                self._click_and_verify_gone("btn_keep.png", cached_k[0], cached_k[1], max_wait=0.65, retries=2)
+                self.input.click(cached_k[0], cached_k[1], post_delay=0.14 * self._spd, stop_check=self.should_stop)
                 self.stats.kept += 1
             else:
                 res_k = self._click_ui("btn_keep.png", timeout=4.0, post_delay=0.16 * self._spd)
@@ -980,8 +1102,15 @@ class DaoRongBot:
             else:
                 self.log("[LỖI] Không thấy nút Chúc phúc (btn_bless.png)! Hãy chụp lại ở mục Cài Đặt Vùng & Nút.")
 
-        # Ghi nhận thống kê cặp bố mẹ (file cố định ~10KB) + Rồng Quý Vừa Nổ
+        # Ghi nhận vào Sổ Tay Rồng Vừa Lai (chỉ ghi con Cất thuộc độ hiếm cho phép Hóa Bụi; TUYỆT ĐỐI không ghi con Chúc phúc!)
         id_name, id_rarity, id_stars = getattr(self, "_last_identified", ("", "", None))
+        if action == "keep" and id_rarity and id_stars is not None:
+            enabled_dr = set(self.config.get("dust_rarities", ["Nguyên Liệu"]))
+            max_st = int(self.config.get("dust_max_star", 0) or 0)
+            if id_rarity in enabled_dr and (max_st == 0 or id_stars <= max_st):
+                lkey = (id_rarity, int(id_stars))
+                self._session_dust_ledger[lkey] = self._session_dust_ledger.get(lkey, 0) + 1
+                self.log_tech(f"[SỔ HÓA BỤI] +1 ({id_rarity}, {id_stars}★) -> tổng chờ bụi: {sum(self._session_dust_ledger.values())}")
         try:
             self.pair_stats.record_breed(
                 self.config.get("selected_parent_1", ""),
@@ -1227,6 +1356,32 @@ class DaoRongBot:
                 return val
         return None
 
+    def _is_card_protected(self, screen, rect, badge_x: int, badge_y: int, badge_w: int = 60, badge_h: int = 40) -> bool:
+        """Kiểm tra thẻ rồng có khớp với ảnh nào trong thư mục templates/protect_dust (Cấm Hóa Bụi) không."""
+        if not self.protect_dust_dir.is_dir():
+            return False
+        prot_files = [p for p in self.protect_dust_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+        if not prot_files:
+            return False
+        sx = rect.width / 1330.0
+        sy = rect.height / 761.0
+        card_left = max(0, (badge_x - rect.left) - max(badge_w // 2, int(28 * sx)))
+        card_top = max(0, (badge_y - rect.top) - max(badge_h // 2, int(18 * sy)))
+        x2 = min(rect.width, int(card_left + 175 * sx))
+        y2 = min(rect.height, int(card_top + 105 * sy))
+        sub = screen[card_top:y2, card_left:x2]
+        if sub.size == 0:
+            return False
+        for pf in prot_files:
+            tpl = self.vision._load_template(pf, target_rect=rect)
+            if tpl is None or sub.shape[0] < tpl.shape[0] or sub.shape[1] < tpl.shape[1]:
+                continue
+            res = cv2.matchTemplate(sub, tpl, cv2.TM_CCOEFF_NORMED)
+            _, mv, _, _ = cv2.minMaxLoc(res)
+            if float(mv) >= 0.88:
+                return True
+        return False
+
     DUST_RARITY_TEMPLATES = {
         "Phổ biến": "dust_badge_pho_bien.png",
         "Nguyên Liệu": "dragon_nguyen_lieu.png",
@@ -1289,6 +1444,11 @@ class DaoRongBot:
         hold_end = float(self._drag_cfg("drag_hold_end", 0.12))
         settle = self._timing("scroll_settle_delay", 0.50)
         dust_max_star = int(self.config.get("dust_max_star", 0) or 0)
+        only_session = bool(self.config.get("dust_only_session_bred", True))
+        # Chỉ dùng Sổ Tay khi trong phiên đã thực sự lai ra ít nhất 1 con chờ hóa bụi (nếu mở app khi túi đã đầy sẵn -> dùng lọc sao + độ hiếm an toàn)
+        use_ledger = only_session and sum(self._session_dust_ledger.values()) > 0
+        if use_ledger:
+            self.log(f"📒 [SỔ HÓA BỤI] Chỉ hóa bụi đúng {sum(self._session_dust_ledger.values())} rồng vừa lai trong đợt này (tự né 100% rồng cũ trong túi)!")
 
         empty_scrolls = 0
         bottom_hit_count = 0
@@ -1299,11 +1459,15 @@ class DaoRongBot:
                 return BotState.OPEN_BREED
             if self._need_restart or self._need_rescan:
                 return BotState.DUST_MATERIALS
+            if use_ledger and sum(self._session_dust_ledger.values()) <= 0:
+                self.log("📒 [SỔ HÓA BỤI] Đã hóa bụi sạch toàn bộ rồng vừa lai trong đợt -> Quay về Đảo Trứng ngay!")
+                break
 
             screen, rect = self.vision.capture_window()
             candidates = self._find_all_dust_candidates(screen=screen, rect=rect)
 
             chosen: Optional[MatchResult] = None
+            chosen_star: Optional[int] = None
             for cand in candidates:
                 if any(abs(cand.x - sx) < 30 and abs(cand.y - sy) < 30 for sx, sy in skipped_pts):
                     continue
@@ -1311,17 +1475,31 @@ class DaoRongBot:
                     self.log(f"[HÓA BỤI] Bỏ qua rồng đang bị khóa (🔒) tại ({cand.x}, {cand.y}).")
                     skipped_pts.append((cand.x, cand.y))
                     continue
-                if dust_max_star > 0:
+                if self._is_card_protected(screen, rect, cand.x, cand.y, cand.w, cand.h):
+                    self.log(f"🛡️ [CẤM HÓA BỤI] Bỏ qua rồng cũ được bảo vệ tại ({cand.x}, {cand.y}).")
+                    skipped_pts.append((cand.x, cand.y))
+                    continue
+
+                c_star = None
+                if use_ledger or dust_max_star > 0:
                     c_star = self._read_card_star(screen, rect, cand.x, cand.y, cand.w, cand.h)
                     if c_star is None:
-                        self.log(f"🛡️ [HÓA BỤI - AN TOÀN] Không đọc rõ số sao của thẻ [{cand.name}] -> Bỏ qua để tránh hóa bụi nhầm rồng sao cao!")
+                        self.log(f"🛡️ [HÓA BỤI - AN TOÀN] Không đọc rõ số sao của thẻ [{cand.name}] -> Bỏ qua an toàn!")
                         skipped_pts.append((cand.x, cand.y))
                         continue
-                    if c_star > dust_max_star:
+                    if dust_max_star > 0 and c_star > dust_max_star:
                         self.log(f"🛡️ [HÓA BỤI] Chừa lại rồng [{cand.name}] {c_star}★ (> mức tối đa {dust_max_star}★).")
                         skipped_pts.append((cand.x, cand.y))
                         continue
+                    if use_ledger:
+                        lkey = (cand.name, int(c_star))
+                        if self._session_dust_ledger.get(lkey, 0) <= 0:
+                            self.log_tech(f"[SỔ HÓA BỤI] Bỏ qua rồng cũ [{cand.name} {c_star}★] (không nằm trong sổ vừa lai).")
+                            skipped_pts.append((cand.x, cand.y))
+                            continue
+
                 chosen = cand
+                chosen_star = c_star
                 break
 
             if chosen is not None:
@@ -1351,9 +1529,15 @@ class DaoRongBot:
                     )
                     if res_cf and res_cf.found:
                         self.stats.dusted += 1
+                        if use_ledger and chosen_star is not None:
+                            lkey = (chosen.name, int(chosen_star))
+                            if self._session_dust_ledger.get(lkey, 0) > 0:
+                                self._session_dust_ledger[lkey] -= 1
                         self.on_stats(self.stats)
                         skipped_pts.clear()
-                        self.log(f"[HÓA BỤI] Xong (tổng: {self.stats.dusted}).")
+                        rem = sum(self._session_dust_ledger.values()) if use_ledger else -1
+                        rem_s = f" | Còn lại trong sổ: {rem}" if rem >= 0 else ""
+                        self.log(f"[HÓA BỤI] Xong [{chosen.name}{f' {chosen_star}★' if chosen_star else ''}] (tổng: {self.stats.dusted}{rem_s}).")
                     else:
                         self.log("[HÓA BỤI] Không hiện bảng Xác nhận (rồng có thể đang khóa) -> Đánh dấu bỏ qua thẻ này.")
                         skipped_pts.append((chosen.x, chosen.y))
@@ -1491,7 +1675,7 @@ class DaoRongBot:
     def _run_loop(self) -> None:
         mode_lbl = "Chỉ Auto Lai" if self.is_breed_only else "Lai + Hóa Bụi"
         ctrl_lbl = f"Chạy Ngầm ADB ({self.adb_serial})" if self.input.is_adb_mode else "Chuột Tự Nhiên"
-        self.log(f"=== BẮT ĐẦU DaoRong_tool v10.3.3 [{self.account_label}] | {mode_lbl} | {ctrl_lbl} ===")
+        self.log(f"=== BẮT ĐẦU DaoRong_tool v10.4 [{self.account_label}] | {mode_lbl} | {ctrl_lbl} ===")
         state = BotState.OPEN_BREED
         idle = self._timing("loop_idle_delay", 0.10)
 
@@ -1530,4 +1714,4 @@ class DaoRongBot:
         finally:
             self.stats.current_state = "Đã dừng"
             self.on_stats(self.stats)
-            self.log(f"=== ĐÃ DỪNG DaoRong_tool v10.3.3 [{self.account_label}] ===")
+            self.log(f"=== ĐÃ DỪNG DaoRong_tool v10.4 [{self.account_label}] ===")

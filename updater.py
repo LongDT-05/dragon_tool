@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
-CURRENT_VERSION = "10.3.3"
+CURRENT_VERSION = "11.0"
 
 DEFAULT_MANIFEST_URL = "https://github.com/LongDT-05/dragon_tool/releases/latest/download/version.json"
 
@@ -59,9 +59,16 @@ def check_for_update(manifest_url: str, timeout: float = 8.0) -> UpdateInfo:
         )
 
     try:
+        import time as _t
+        sep = "&" if "?" in url else "?"
+        bust_url = f"{url}{sep}t={int(_t.time())}"
         req = urllib.request.Request(
-            url,
-            headers={"User-Agent": f"DaoRong_tool/{CURRENT_VERSION}"},
+            bust_url,
+            headers={
+                "User-Agent": f"DaoRong_tool/{CURRENT_VERSION}",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            },
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8-sig")

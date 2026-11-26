@@ -105,12 +105,14 @@ REQUIRED_UI_TEMPLATES = [
     ("btn_close_dust_x.png", "Dấu X đóng bảng Hóa Bụi", False),
     ("btn_keep_after_bless.png", "Nút 'Cất rồng' sau chúc phúc", False),
     ("icon_dragon_locked.png", "Ổ khóa trắng (né rồng khóa khi Hóa Bụi)", False),
-    ("btn_home_island.png", "Nút Về Đảo (tự thoát khi lạc vào Map)", False),
+    ("btn_home_island.png", "Nút Về Đảo màn phụ", False),
+    ("btn_home_worldmap.png", "Nút Về Đảo World Map (nhà vàng)", False),
+    ("slot_parent_empty.png", "Ô bố mẹ trống (kiểm chứng chống chọn nhầm)", False),
 ]
 
 
 def ensure_directories() -> None:
-    for sub in ["ui", "parents", "keep", "sell", "bless", "dust_targets"]:
+    for sub in ["ui", "parents", "keep", "sell", "bless", "dust_targets", "protect_dust"]:
         (TEMPLATES_DIR / sub).mkdir(parents=True, exist_ok=True)
     PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -128,11 +130,29 @@ def load_config() -> Dict[str, Any]:
     cfg.setdefault("bot_mode", "breed_and_dust")
     cfg.setdefault("control_mode", "windows")
     cfg.setdefault("dust_rarities", ["Nguyên Liệu"])
+    cfg.setdefault("dust_only_session_bred", True)
     cfg.setdefault("human_like_input", True)
     cfg.setdefault("human_break_enabled", True)
     cfg.setdefault("save_rare_snapshots", True)
     cfg.setdefault("sound_alert", True)
     cfg.setdefault("verbose_log", False)
+    # Tự động nâng cấp thông số vuốt thanh rồng & khung quét cho người dùng nâng từ bản cũ (< v11.0)
+    # mà vẫn giữ nguyên 100% luật rồng, cặp bố mẹ, ghim tọa độ và hồ sơ!
+    if int(cfg.get("config_schema_version", 0) or 0) < 11:
+        drag = cfg.setdefault("drag", {})
+        drag["bottom_bar_roi"] = [0.15, 0.62, 0.61, 0.89]
+        drag["bottom_drag_start"] = [0.47, 0.75]
+        drag["bottom_drag_end"] = [0.29, 0.75]
+        drag["drag_duration"] = 0.30
+        drag["drag_hold_end"] = 0.08
+        drag["result_name_roi"] = [0.57, 0.285, 0.78, 0.348]
+        timing = cfg.setdefault("timing", {})
+        timing["scroll_settle_delay"] = 0.24
+        cfg["config_schema_version"] = 11
+        try:
+            save_config(cfg)
+        except Exception:
+            pass
     return cfg
 
 
@@ -179,6 +199,7 @@ class DaoRongStudioV10(ctk.CTk):
         self._hud_lbl_status: Optional[ctk.CTkLabel] = None
         self._hud_lbl_kpi: Optional[ctk.CTkLabel] = None
         self._pending_update_info = None
+        self._last_notified_update_ver = ""
         self._log_line_count = 0
 
         self._pages: Dict[str, ctk.CTkFrame] = {}
@@ -602,7 +623,7 @@ class DaoRongStudioV10(ctk.CTk):
 
         self.var_rule_tab = tk.StringVar(value="Chúc phúc")
         self.seg_rule_tabs = ctk.CTkSegmentedButton(
-            right_card, values=["Bố/Mẹ", "Chúc phúc", "Cất", "Bán", "Hóa Bụi"],
+            right_card, values=["Bố/Mẹ", "Chúc phúc", "Cất", "Bán", "Cấm Bụi"],
             variable=self.var_rule_tab, command=lambda _v: self._refresh_active_rule_view(),
             height=28, corner_radius=7, font=ctk.CTkFont("Segoe UI", 11, "bold"),
         )
@@ -627,7 +648,7 @@ class DaoRongStudioV10(ctk.CTk):
         self._filter_catalog_list()
 
     def _rule_tab_to_key(self) -> str:
-        return {"Bố/Mẹ": "parents", "Chúc phúc": "bless", "Cất": "keep", "Bán": "sell", "Hóa Bụi": "dust_targets"}.get(self.var_rule_tab.get(), "bless")
+        return {"Bố/Mẹ": "parents", "Chúc phúc": "bless", "Cất": "keep", "Bán": "sell", "Cấm Bụi": "protect_dust"}.get(self.var_rule_tab.get(), "bless")
 
     def _refresh_active_rule_view(self) -> None:
         if not hasattr(self, "lb_active_rules"):
@@ -639,9 +660,8 @@ class DaoRongStudioV10(ctk.CTk):
             for rule in self.config_data.get("dragon_text_rules", {}).get(key, []):
                 self.lb_active_rules.insert(tk.END, f"[TÊN] {rule}")
                 cnt += 1
-        if key == "dust_targets":
-            rars = ", ".join(self.config_data.get("dust_rarities", ["Nguyên Liệu"]))
-            self.lb_active_rules.insert(tk.END, f"[MẶC ĐỊNH] Độ hiếm đang bật: {rars}")
+        if key == "protect_dust":
+            self.lb_active_rules.insert(tk.END, "[BẢO VỆ] Chụp ảnh thẻ rồng cũ quý vào đây -> Tool CẤM hóa bụi 100%!")
         for p in sorted((TEMPLATES_DIR / key).iterdir()):
             if p.suffix.lower() in {".png", ".jpg", ".jpeg"}:
                 self.lb_active_rules.insert(tk.END, f"[ẢNH] {p.name}" if key != "parents" else p.name)
@@ -727,6 +747,7 @@ class DaoRongStudioV10(ctk.CTk):
         self.var_auto_scale = tk.BooleanVar(value=bool(self.config_data.get("auto_scale_templates", True)))
         self.var_enable_ocr = tk.BooleanVar(value=bool(self.config_data.get("enable_text_ocr", True)))
         self.var_auto_update = tk.BooleanVar(value=bool(self.config_data.get("auto_check_update", True)))
+        self.var_dust_only_session = tk.BooleanVar(value=bool(self.config_data.get("dust_only_session_bred", True)))
         self.var_human_like = tk.BooleanVar(value=bool(self.config_data.get("human_like_input", True)))
         self.var_human_break = tk.BooleanVar(value=bool(self.config_data.get("human_break_enabled", True)))
         self.var_save_rare = tk.BooleanVar(value=bool(self.config_data.get("save_rare_snapshots", True)))
@@ -754,6 +775,9 @@ class DaoRongStudioV10(ctk.CTk):
             v = tk.BooleanVar(value=(r_lbl in saved_dr))
             self.var_dust_rars[r_lbl] = v
             ctk.CTkCheckBox(r_dr, text=r_lbl, variable=v, width=90, font=ctk.CTkFont("Segoe UI", 11)).pack(side="left", padx=(0, 6))
+        r_led = ctk.CTkFrame(c1, fg_color="transparent")
+        r_led.pack(fill="x", padx=12, pady=(0, 10))
+        ctk.CTkSwitch(r_led, text="Sổ Tay Rồng Vừa Lai: CHỈ hóa bụi đúng những con vừa lai ra trong phiên (né 100% rồng cũ có sẵn!)", variable=self.var_dust_only_session, font=ctk.CTkFont("Segoe UI", 11, "bold")).pack(side="left")
 
         # Nhóm Công tắc An Toàn & Tiện Ích
         c2 = ctk.CTkFrame(sc_b, corner_radius=10, fg_color=C["console"], border_width=1, border_color=C["border"])
@@ -1363,6 +1387,7 @@ class DaoRongStudioV10(ctk.CTk):
             self.config_data["island_hops"] = int(self.var_hops.get() or 2)
             self.config_data["dust_max_star"] = max(0, int(self.var_dust_max_star.get() or 0))
             self.config_data["dust_rarities"] = [k for k, v in self.var_dust_rars.items() if v.get()] or ["Nguyên Liệu"]
+            self.config_data["dust_only_session_bred"] = bool(self.var_dust_only_session.get())
             self.config_data["watchdog_seconds"] = max(0, int(self.var_watchdog_sec.get() or 0))
             self.config_data["adb_path"] = self.var_adb_path.get().strip()
             self.config_data["use_color_check"] = bool(self.var_color_check.get())
@@ -1634,7 +1659,8 @@ class DaoRongStudioV10(ctk.CTk):
     # ------------------------------------------------------------------
     def _periodic_update_check(self) -> None:
         self._check_update_async(silent=True)
-        self.after(900_000, self._periodic_update_check)
+        # Tự động kiểm tra ngầm mỗi 3 phút (180s) để báo ngay khi đang treo máy mà có bản mới!
+        self.after(180_000, self._periodic_update_check)
 
     def _check_update_async(self, silent: bool = False) -> None:
         url = self.config_data.get("update_manifest_url", "") or DEFAULT_MANIFEST_URL
@@ -1647,8 +1673,25 @@ class DaoRongStudioV10(ctk.CTk):
             return
         if info.has_update:
             self._pending_update_info = info
-            self.lbl_update_banner.configure(text=f"Có bản mới v{info.latest_version}! {info.notes or ''}")
-            self.update_banner.pack(side="top", fill="x", before=self.content)
+            note_short = (info.notes or "").strip()[:95]
+            self.lbl_update_banner.configure(text=f"🔔 Có bản mới v{info.latest_version}! {note_short}")
+            if not self.update_banner.winfo_ismapped():
+                self.update_banner.pack(side="top", fill="x", before=self.content)
+            # Đổi màu nút Cập nhật trên thanh tiêu đề để người đang mở app thấy ngay lập tức!
+            self.btn_check_update.configure(
+                text=f"● v{info.latest_version}",
+                fg_color=C["amber"],
+                hover_color="#D97706",
+                text_color="#451A03",
+            )
+            if self._last_notified_update_ver != info.latest_version:
+                self._last_notified_update_ver = info.latest_version
+                self.append_log(f"🔔 [CẬP NHẬT] Đã có phiên bản mới v{info.latest_version}! Bấm 'Cập nhật ngay' trên thanh vàng.")
+                if winsound is not None and self.config_data.get("sound_alert", True):
+                    try:
+                        winsound.MessageBeep(winsound.MB_ICONASTERISK)
+                    except Exception:
+                        pass
             if not silent:
                 self._apply_pending_update()
         elif not silent:

@@ -129,5 +129,33 @@
   "human_break_interval_min": 45,
   "human_break_duration_sec": 90,
   "save_rare_snapshots": true,
-  "collect_ai_dataset": false
+  "collect_ai_dataset": false,
+  "dust_only_session_bred": true,
+  "drag": {
+    "bottom_bar_roi": [
+      0.15,
+      0.62,
+      0.61,
+      0.89
+    ],
+    "bottom_drag_start": [
+      0.47,
+      0.75
+    ],
+    "bottom_drag_end": [
+      0.29,
+      0.75
+    ],
+    "drag_duration": 0.3,
+    "drag_hold_end": 0.08,
+    "result_name_roi": [
+      0.57,
+      0.285,
+      0.78,
+      0.348
+    ]
+  },
+  "timing": {
+    "scroll_settle_delay": 0.24
+  }
 }

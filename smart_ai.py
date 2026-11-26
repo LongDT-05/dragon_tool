@@ -193,7 +193,16 @@ class PersistentNameCache:
         self.index_path = self.cache_dir / "index.json"
         self._entries: Dict[str, Dict[str, Any]] = {}
         self._images: Dict[str, np.ndarray] = {}
+        self._sigs: Dict[str, np.ndarray] = {}
         self._load()
+
+    @staticmethod
+    def _make_sig(crop_bgr: np.ndarray, size: Tuple[int, int] = (200, 40)) -> np.ndarray:
+        """Trích chữ sáng trên nền tối thành chữ ký chuẩn hóa (miễn nhiễm rung nền & sai lệch 1-3px)."""
+        gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if crop_bgr.ndim == 3 else crop_bgr
+        # Lọc bỏ nền xanh tối (<105), giữ nổi bật chữ vàng/hồng/trắng của tên rồng + số sao
+        boosted = np.clip((gray.astype(np.float32) - 100.0) * 2.1, 0, 255).astype(np.uint8)
+        return cv2.resize(boosted, size, interpolation=cv2.INTER_AREA)
 
     def _load(self) -> None:
         if not self.index_path.is_file():
@@ -208,9 +217,11 @@ class PersistentNameCache:
                         if img is not None and img.size > 0:
                             self._entries[key] = meta
                             self._images[key] = img
+                            self._sigs[key] = self._make_sig(img, (200, 40))[3:37, 5:195]
         except Exception:
             self._entries.clear()
             self._images.clear()
+            self._sigs.clear()
 
     def _save_index(self) -> None:
         try:
@@ -225,21 +236,18 @@ class PersistentNameCache:
         return len(self._entries)
 
     def match(
-        self, name_crop: np.ndarray, res_key: str, threshold: float = 0.94
+        self, name_crop: np.ndarray, res_key: str, threshold: float = 0.89
     ) -> Optional[Tuple[str, str, Optional[int], float]]:
-        """Trả về (canon_name, rarity, stars, score) trong ~2ms nếu khớp mẫu đã học."""
-        if name_crop is None or name_crop.size == 0 or not self._entries:
+        """Trả về (canon_name, rarity, stars, score) trong ~1ms nhờ chữ ký chữ sáng có dung sai ±3px."""
+        if name_crop is None or name_crop.size == 0 or not self._sigs:
             return None
+        # Cùng tỷ lệ 200x40 so với lõi 190x34 -> tự trượt ±5px ngang & ±3px dọc chống lệch khung!
+        q_sig = self._make_sig(name_crop, (200, 40))
         best_sc = 0.0
         best_key = None
-        for key, meta in self._entries.items():
-            if meta.get("res_key") != res_key:
-                continue
-            tpl = self._images.get(key)
-            if tpl is None or tpl.shape != name_crop.shape:
-                continue
-            res = cv2.matchTemplate(name_crop, tpl, cv2.TM_CCOEFF_NORMED)
-            sc = float(res[0, 0])
+        for key, tpl_sig in self._sigs.items():
+            res = cv2.matchTemplate(q_sig, tpl_sig, cv2.TM_CCOEFF_NORMED)
+            sc = float(res.max())
             if sc >= threshold and sc > best_sc:
                 best_sc = sc
                 best_key = key
@@ -283,6 +291,7 @@ class PersistentNameCache:
             old_f.unlink(missing_ok=True)
             self._entries.pop(oldest_k, None)
             self._images.pop(oldest_k, None)
+            self._sigs.pop(oldest_k, None)
 
         if imwrite_unicode(fpath, name_crop):
             self._entries[key] = {
@@ -294,6 +303,7 @@ class PersistentNameCache:
                 "last_used": int(time.time()),
             }
             self._images[key] = name_crop.copy()
+            self._sigs[key] = self._make_sig(name_crop, (200, 40))[3:37, 5:195]
             self._save_index()
 
     def clear(self) -> int:
@@ -302,6 +312,7 @@ class PersistentNameCache:
             (self.cache_dir / meta.get("file", "")).unlink(missing_ok=True)
         self._entries.clear()
         self._images.clear()
+        self._sigs.clear()
         if self.index_path.is_file():
             self.index_path.unlink(missing_ok=True)
         return removed

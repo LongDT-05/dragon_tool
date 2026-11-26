@@ -23,7 +23,7 @@ if exist "dist\DaoRong_tool" rmdir /s /q "dist\DaoRong_tool"
 echo [3/4] Dang dong goi DaoRong_tool.exe (da toi uu dung luong)...
 copy /Y "app_icon.ico" "build_obf\app_icon.ico" >nul
 pushd build_obf
-"..\.venv\Scripts\python.exe" -m PyInstaller --noconfirm --onedir --windowed --uac-admin --name DaoRong_tool --icon=app_icon.ico --distpath ..\dist --workpath ..\build --add-data "pyarmor_runtime_000000;pyarmor_runtime_000000" --collect-all customtkinter --collect-all rapidocr_onnxruntime --exclude-module matplotlib --exclude-module scipy --exclude-module pandas --exclude-module pytest --exclude-module IPython --exclude-module PyQt5 --exclude-module PySide6 --exclude-module notebook --exclude-module sphinx main.py
+"..\.venv\Scripts\python.exe" -m PyInstaller --noconfirm --onedir --windowed --name DaoRong_tool --icon=app_icon.ico --distpath ..\dist --workpath ..\build --add-data "pyarmor_runtime_000000;pyarmor_runtime_000000" --collect-all customtkinter --collect-all rapidocr_onnxruntime --exclude-module matplotlib --exclude-module scipy --exclude-module pandas --exclude-module pytest --exclude-module IPython --exclude-module PyQt5 --exclude-module PySide6 --exclude-module notebook --exclude-module sphinx main.py
 set BUILD_ERR=%errorlevel%
 popd
 rmdir /s /q "build_obf"
@@ -32,7 +32,7 @@ goto :COPY_ASSETS
 
 :FALLBACK_NO_OBF
 echo [LUU Y] PyArmor gap loi moi truong, dang dong goi truc tiep bang PyInstaller...
-".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onedir --windowed --uac-admin --name DaoRong_tool --icon=app_icon.ico --collect-all customtkinter --collect-all rapidocr_onnxruntime --exclude-module matplotlib --exclude-module scipy --exclude-module pandas --exclude-module pytest --exclude-module IPython --exclude-module PyQt5 --exclude-module PySide6 main.py
+".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onedir --windowed --name DaoRong_tool --icon=app_icon.ico --collect-all customtkinter --collect-all rapidocr_onnxruntime --exclude-module matplotlib --exclude-module scipy --exclude-module pandas --exclude-module pytest --exclude-module IPython --exclude-module PyQt5 --exclude-module PySide6 main.py
 if errorlevel 1 goto :ERR
 
 :COPY_ASSETS

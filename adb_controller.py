@@ -215,7 +215,7 @@ class AdbController:
         y1: int,
         x2: int,
         y2: int,
-        duration_ms: int = 380,
+        duration_ms: int = 280,
         jitter_px: int = 4,
     ) -> None:
         def _j(v: int) -> int:
