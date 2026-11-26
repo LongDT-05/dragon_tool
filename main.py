@@ -1063,10 +1063,10 @@ class DaoRongStudioV10(ctk.CTk):
                 if r not in rules[cat]:
                     rules[cat].append(r)
         if parsed.get("want_dust_all"):
-            self.config_data["dust_rarities"] = ["Phổ biến", "Nguyên Liệu", "Hiếm", "Cực hiếm", "Event"]
+            self.config_data["dust_rarities"] = ["Phổ biến", "Nguyên Liệu", "Hiếm", "Cực hiếm"]
             if hasattr(self, "var_dust_rars"):
-                for v in self.var_dust_rars.values():
-                    v.set(True)
+                for rk, v in self.var_dust_rars.items():
+                    v.set(rk != "Event")
             if parsed["rules"]["bless"] and int(self.config_data.get("dust_max_star", 0) or 0) == 0:
                 stars_found = [int(m) for r_s in parsed["rules"]["bless"] for m in re.findall(r"(\d{1,2})\s*sao", r_s)]
                 if stars_found:
@@ -1074,7 +1074,7 @@ class DaoRongStudioV10(ctk.CTk):
                     self.config_data["dust_max_star"] = safe_max
                     if hasattr(self, "var_dust_max_star"):
                         self.var_dust_max_star.set(str(safe_max))
-                    self.append_log(f"🛡️ [AI An Toàn] Đã bật Hóa Bụi 5 độ hiếm + Khiên bảo vệ chỉ hóa bụi <= {safe_max}★!")
+                    self.append_log(f"🛡️ [AI An Toàn] Đã bật Hóa Bụi 4 độ hiếm (tự chừa Event) + Khiên bảo vệ chỉ hóa bụi <= {safe_max}★!")
         save_config(self.config_data)
         self._refresh_all_lists()
         self.append_log(f"✨ [AI Luật Rồng] Đã áp dụng {parsed['matched_count']} quy tắc!")

@@ -1201,18 +1201,19 @@ class DaoRongBot:
         _, max_val, _, _ = cv2.minMaxLoc(res)
         return float(max_val) >= 0.72
 
-    def _read_card_star(self, screen, rect, badge_x: int, badge_y: int) -> Optional[int]:
-        """Đọc nhanh số sao ở góc trên-phải của thẻ rồng trong Túi Chứa Rồng (khi bật lọc sao Hóa Bụi)."""
+    def _read_card_star(self, screen, rect, badge_x: int, badge_y: int, badge_w: int = 60, badge_h: int = 40) -> Optional[int]:
+        """Đọc chính xác số sao góc trên-phải thẻ rồng (tính từ góc trên-trái thẻ -> chuẩn cho cả 5 độ hiếm!)."""
         if not self.text_matcher.is_available:
             return None
         sx = rect.width / 1330.0
         sy = rect.height / 761.0
-        lx = badge_x - rect.left
-        ly = badge_y - rect.top
-        x1 = max(0, int(lx + 45 * sx))
-        x2 = min(rect.width, int(lx + 135 * sx))
-        y1 = max(0, int(ly - 22 * sy))
-        y2 = min(rect.height, int(ly + 24 * sy))
+        # Quy về góc trên-trái của thẻ rồng bất kể mẫu cắt rộng hay hẹp
+        card_left = (badge_x - rect.left) - max(badge_w // 2, int(28 * sx))
+        card_top = (badge_y - rect.top) - max(badge_h // 2, int(18 * sy))
+        x1 = max(0, int(card_left + 88 * sx))
+        x2 = min(rect.width, int(card_left + 148 * sx))
+        y1 = max(0, int(card_top - 4 * sy))
+        y2 = min(rect.height, int(card_top + 42 * sy))
         if x2 <= x1 + 10 or y2 <= y1 + 10:
             return None
         sub = screen[y1:y2, x1:x2]
@@ -1311,7 +1312,7 @@ class DaoRongBot:
                     skipped_pts.append((cand.x, cand.y))
                     continue
                 if dust_max_star > 0:
-                    c_star = self._read_card_star(screen, rect, cand.x, cand.y)
+                    c_star = self._read_card_star(screen, rect, cand.x, cand.y, cand.w, cand.h)
                     if c_star is None:
                         self.log(f"🛡️ [HÓA BỤI - AN TOÀN] Không đọc rõ số sao của thẻ [{cand.name}] -> Bỏ qua để tránh hóa bụi nhầm rồng sao cao!")
                         skipped_pts.append((cand.x, cand.y))
@@ -1370,9 +1371,16 @@ class DaoRongBot:
             x1, y1 = rect.rel_to_abs(start_rel[0], start_rel[1])
             x2, y2 = rect.rel_to_abs(end_rel[0], end_rel[1])
             self.log(f"[HÓA BỤI] Kéo danh sách 2 cột xuống ({empty_scrolls}/{max_scrolls})...")
-            self.input.smooth_drag(
-                x1, y1, x2, y2, duration=drag_dur, hold_end=hold_end, stop_check=self.should_stop
-            )
+            if self.input.is_adb_mode:
+                # Thu hẹp quãng vuốt ADB & tăng thời gian để triệt tiêu quán tính trôi lố trên LDPlayer
+                mid_x = (x1 + x2) // 2
+                ax1 = int(mid_x + (x1 - mid_x) * 0.62)
+                ax2 = int(mid_x + (x2 - mid_x) * 0.62)
+                self.input.smooth_drag(ax1, y1, ax2, y2, duration=max(0.55, drag_dur * 1.45), hold_end=0.18, stop_check=self.should_stop)
+            else:
+                self.input.smooth_drag(
+                    x1, y1, x2, y2, duration=drag_dur, hold_end=hold_end, stop_check=self.should_stop
+                )
             self.input.sleep_interruptible(settle, self.should_stop)
 
             after_scr, after_rect = self.vision.capture_window()
@@ -1483,7 +1491,7 @@ class DaoRongBot:
     def _run_loop(self) -> None:
         mode_lbl = "Chỉ Auto Lai" if self.is_breed_only else "Lai + Hóa Bụi"
         ctrl_lbl = f"Chạy Ngầm ADB ({self.adb_serial})" if self.input.is_adb_mode else "Chuột Tự Nhiên"
-        self.log(f"=== BẮT ĐẦU DaoRong_tool v10.2 [{self.account_label}] | {mode_lbl} | {ctrl_lbl} ===")
+        self.log(f"=== BẮT ĐẦU DaoRong_tool v10.3.3 [{self.account_label}] | {mode_lbl} | {ctrl_lbl} ===")
         state = BotState.OPEN_BREED
         idle = self._timing("loop_idle_delay", 0.10)
 
@@ -1522,4 +1530,4 @@ class DaoRongBot:
         finally:
             self.stats.current_state = "Đã dừng"
             self.on_stats(self.stats)
-            self.log(f"=== ĐÃ DỪNG DaoRong_tool v10.2 [{self.account_label}] ===")
+            self.log(f"=== ĐÃ DỪNG DaoRong_tool v10.3.3 [{self.account_label}] ===")

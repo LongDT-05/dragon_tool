@@ -42,8 +42,6 @@ copy /Y "dragons_db.json" "dist\DaoRong_tool\dragons_db.json" >nul
 copy /Y "app_icon.ico" "dist\DaoRong_tool\app_icon.ico" >nul
 copy /Y "app_icon.png" "dist\DaoRong_tool\app_icon.png" >nul
 xcopy /E /I /Y "templates" "dist\DaoRong_tool\templates" >nul
-rem Xoa model xoay chu 180 do khong dung cua RapidOCR de giam dung luong
-if exist "dist\DaoRong_tool\_internal\rapidocr_onnxruntime\models\ch_ppocr_mobile_v2.0_cls_infer.onnx" del /f /q "dist\DaoRong_tool\_internal\rapidocr_onnxruntime\models\ch_ppocr_mobile_v2.0_cls_infer.onnx" >nul
 
 echo.
 echo ============================================================
