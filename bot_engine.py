@@ -33,7 +33,8 @@ from smart_ai import (
     RareMomentSaver,
     TrainingDatasetCollector,
 )
-from vision import MatchResult, VisionEngine, compute_frame_diff, compute_frame_similarity
+from updater import CURRENT_VERSION
+from vision import MatchResult, VisionEngine, WindowRect, compute_frame_diff, compute_frame_similarity, imread_unicode
 
 
 class BotState(str, Enum):
@@ -604,6 +605,47 @@ class DaoRongBot:
     # ------------------------------------------------------------------
     # Bước 1: Mở bảng Lai Rồng (Chống rồng bay che trứng)
     # ------------------------------------------------------------------
+    def _is_on_dust_island(self, screen: np.ndarray, rect: WindowRect) -> bool:
+        altar_p = self._ui("btn_altar_center.png")
+        if altar_p.is_file():
+            return self.vision.find_template(altar_p, threshold=0.68, screen_bgr=screen, rect=rect).found
+        return False
+
+    def _scan_islands_for_egg(self) -> bool:
+        """Tự động bấm mũi tên chuyển đảo (< rồi >) để tìm về đúng Đảo Trứng khi người dùng bật tool ở đảo khác."""
+        egg_p = self._ui("btn_egg.png")
+        if not egg_p.is_file():
+            return False
+        nav_thr = self._conf("nav_button", 0.72)
+        for arrow_name, label, max_hops in [
+            ("btn_arrow_left.png", "sang trái (<)", 4),
+            ("btn_arrow_right.png", "sang phải (>)", 6),
+        ]:
+            arr_p = self._ui(arrow_name)
+            if not arr_p.is_file():
+                continue
+            for hop in range(1, max_hops + 1):
+                if not self.wait_if_paused():
+                    return False
+                scr, rect = self.vision.capture_window()
+                if self._is_breed_ui_open(scr, rect):
+                    return True
+                m_egg = self.vision.find_template(egg_p, threshold=0.68, screen_bgr=scr, rect=rect)
+                if m_egg.found:
+                    self.log(f"🏝️ Đã tìm thấy Đảo Trứng sau khi chuyển đảo {label}!")
+                    return True
+                m_arr = self.vision.find_template(arr_p, threshold=nav_thr, screen_bgr=scr, rect=rect)
+                if not m_arr.found:
+                    break
+                self.log(f"🏝️ Chưa thấy Trứng trên đảo này -> Chuyển đảo {label} ({hop}/{max_hops})...")
+                self.input.click(m_arr.x, m_arr.y, post_delay=0.70 * self._spd, stop_check=self.should_stop)
+                # Kiểm tra ngay sau khi chuyển đảo
+                scr2, rect2 = self.vision.capture_window()
+                if self.vision.find_template(egg_p, threshold=0.68, screen_bgr=scr2, rect=rect2).found:
+                    self.log("🏝️ Đã về đúng Đảo Trứng!")
+                    return True
+        return False
+
     def _step_open_breed(self) -> BotState:
         self._set_state(BotState.OPEN_BREED)
         screen, rect = self.vision.capture_window()
@@ -616,9 +658,22 @@ class DaoRongBot:
             self.log("[PHỤC HỒI] Đang ở giao diện Hóa Bụi -> Chuyển sang dọn nguyên liệu.")
             return BotState.DUST_MATERIALS
 
-        # Thử mở trứng tối đa 6 lần (chống rồng trên đảo bay che kín trứng)
+        # Nếu đang lạc ở World Map / màn hình phụ -> bấm Về Đảo trước!
+        if not self._has_island_arrows(screen, rect):
+            if self._recover_from_map_or_subscreen():
+                screen, rect = self.vision.capture_window()
+
+        # Nhận diện ngay nếu người dùng đang đứng ở Đảo Tẩy Tủy -> tự dò về Đảo Trứng, không click nhầm vào Tháp!
+        egg_path = self._ui("btn_egg.png")
+        egg_visible = egg_path.is_file() and self.vision.find_template(egg_path, threshold=0.68, screen_bgr=screen, rect=rect).found
+        if not egg_visible and self._is_on_dust_island(screen, rect):
+            self.log("🏝️ Phát hiện đang ở Đảo Tẩy Tủy -> Tự chuyển đảo tìm về Đảo Trứng!")
+            self._scan_islands_for_egg()
+            screen, rect = self.vision.capture_window()
+
+        # Thử mở trứng tối đa 4 lần (nếu sau 2 lần vẫn không thấy mở bảng Lai -> dò đảo khác!)
         egg_rel = self._pin("egg_rel", [0.49, 0.34])
-        spiral_offsets = [(0, 0), (0, 14), (-14, 0), (14, 0), (0, -14), (10, 10)]
+        spiral_offsets = [(0, 0), (0, 14), (-14, 0), (14, 0)]
 
         for attempt, (ox, oy) in enumerate(spiral_offsets, 1):
             if not self.wait_if_paused():
@@ -628,37 +683,38 @@ class DaoRongBot:
             if self._is_breed_ui_open(screen, rect):
                 return BotState.SELECT_PARENTS
 
-            # Ưu tiên tìm ảnh mẫu trứng ở lần 1; nếu rồng bay che -> click thẳng tọa độ ghim + xoay nhẹ
-            egg_path = self._ui("btn_egg.png")
             clicked_pos = None
-            if attempt == 1 and egg_path.is_file():
+            if egg_path.is_file():
                 res = self.vision.find_template(egg_path, threshold=0.68, screen_bgr=screen, rect=rect)
                 if res.found:
                     clicked_pos = (res.x, res.y)
-                    # Tự học lại tọa độ ghim tương đối mới nhất
                     self.config.setdefault("pins", {})["egg_rel"] = list(rect.abs_to_rel(res.x, res.y))
 
             if clicked_pos is None:
+                # Nếu thử ghim 2 lần rồi mà chưa mở được bảng Lai -> có thể đang đứng sai đảo -> tự quét chuyển đảo!
+                if attempt == 3:
+                    self.log("🏝️ Không thấy trứng trên đảo hiện tại -> Tự dò các đảo lân cận tìm Đảo Trứng...")
+                    if self._scan_islands_for_egg():
+                        return BotState.OPEN_BREED
                 px, py = rect.rel_to_abs(egg_rel[0], egg_rel[1])
                 clicked_pos = (px + ox, py + oy)
                 self.log(
-                    f"[TRỨNG] Rồng có thể đang che trứng -> Click điểm ghim lần {attempt}/6 tại {clicked_pos}."
+                    f"[TRỨNG] Rồng có thể đang che trứng -> Click điểm ghim lần {attempt}/4 tại {clicked_pos}."
                 )
             else:
                 self.log(f"[TRỨNG] Click trứng tại {clicked_pos}.")
 
             self.input.click(clicked_pos[0], clicked_pos[1], post_delay=0.30 * self._spd, stop_check=self.should_stop)
 
-            # Kiểm tra đã mở đúng bảng Lai Rồng chưa
             chk_scr, chk_rect = self.vision.capture_window()
             if self._is_breed_ui_open(chk_scr, chk_rect):
                 return BotState.SELECT_PARENTS
 
-            # Nếu lỡ click trúng con rồng bay ngang làm mở bảng thông tin rồng -> đóng bảng đó rồi thử lại!
             self._dismiss_stray_popups(max_clicks=1)
-            self.input.sleep_interruptible(0.35, self.should_stop)
+            self.input.sleep_interruptible(0.30, self.should_stop)
 
-        self.log("[PHỤC HỒI] Không mở được trứng sau 6 lần thử -> Kiểm tra xem có đang lệch đảo không.")
+        self.log("[PHỤC HỒI] Không mở được trứng -> Tự dò lại đảo...")
+        self._scan_islands_for_egg()
         self.stats.recoveries += 1
         self.on_stats(self.stats)
         return BotState.OPEN_BREED
@@ -691,11 +747,14 @@ class DaoRongBot:
             core = tpl[int(th * 0.22):int(th * 0.88), int(tw * 0.14):int(tw * 0.86)]
             if core.shape[0] < 14 or core.shape[1] < 14:
                 continue
-            for sc in (0.85, 0.95, 1.05, 1.15, 1.25):
-                nw, nh = int(core.shape[1] * sc), int(core.shape[0] * sc)
-                if nw < 10 or nh < 10 or nw >= sw or nh >= sh:
+            # Chuẩn hóa theo tỷ lệ bề rộng của slot_crop -> bất biến với mọi độ phân giải LDPlayer / ADB!
+            c_h, c_w = core.shape[:2]
+            for frac in (0.42, 0.50, 0.58, 0.66, 0.74, 0.82):
+                nw = int(sw * frac)
+                nh = int(nw * (c_h / max(1, c_w)))
+                if nw < 12 or nh < 12 or nw >= sw or nh >= sh:
                     continue
-                r = cv2.matchTemplate(slot_crop, cv2.resize(core, (nw, nh)), cv2.TM_CCOEFF_NORMED)
+                r = cv2.matchTemplate(slot_crop, cv2.resize(core, (nw, nh), interpolation=cv2.INTER_AREA), cv2.TM_CCOEFF_NORMED)
                 val = float(r.max())
                 if val > best_sc:
                     best_sc = val
@@ -725,7 +784,7 @@ class DaoRongBot:
         ):
             sc = self._slot_matches_any_parent(screen, rect, s_roi, parents)
             self.log_tech(f"[KIỂM CHỨNG Ô {idx}] Độ khớp lõi rồng = {sc:.2f}")
-            if sc < 0.46:
+            if sc < 0.45:
                 had_wrong = True
                 cx, cy = rect.rel_to_abs(*self.vision.adjust_rel_point(*center_rel))
                 self.log(f"⚠️ [KIỂM CHỨNG] Ô bố mẹ {idx} bị chọn nhầm (khớp={sc:.2f}) -> Tự bấm gỡ ra chọn lại!")
@@ -741,15 +800,15 @@ class DaoRongBot:
         - Thấy con nào (hoặc cả 2 con) trên cùng màn hình -> bấm chọn ngay lập tức!
         """
         roi = self._drag_cfg("bottom_bar_roi", [0.15, 0.62, 0.61, 0.89])
-        # Kéo ngắn ~18% chiều ngang (vừa qua ~1.5 ô rồng) thay vì kéo dài dễ trượt quá
-        start_rel = self._drag_cfg("bottom_drag_start", [0.47, 0.75])
-        end_rel = self._drag_cfg("bottom_drag_end", [0.29, 0.75])
-        max_scrolls = int(self._drag_cfg("max_parent_scrolls", 12))
-        drag_dur = min(0.32, float(self._drag_cfg("drag_duration", 0.30))) * self._spd
-        hold_end = float(self._drag_cfg("drag_hold_end", 0.08))
-        settle = min(0.28, self._timing("scroll_settle_delay", 0.24)) * self._spd
-        # Ngưỡng chặt >= 0.84 chống chọn nhầm rồng cùng màu!
-        thr = max(0.84, self._conf("dragon", 0.75))
+        # Kéo chậm có kiểm soát (~620ms, quãng ngắn ~14% chiều ngang) để TRIỆT TIÊU quán tính trượt (fling) trên ADB!
+        start_rel = self._drag_cfg("bottom_drag_start", [0.44, 0.75])
+        end_rel = self._drag_cfg("bottom_drag_end", [0.30, 0.75])
+        max_scrolls = int(self._drag_cfg("max_parent_scrolls", 14))
+        drag_dur = max(0.58, float(self._drag_cfg("drag_duration", 0.62))) * self._spd
+        hold_end = float(self._drag_cfg("drag_hold_end", 0.14))
+        settle = max(0.35, self._timing("scroll_settle_delay", 0.38)) * self._spd
+        # Ngưỡng chặt >= 0.86 chống chọn nhầm rồng cùng tông màu!
+        thr = max(0.86, self._conf("dragon", 0.75))
 
         need: List[Tuple[str, Path]] = [("Rồng 1", p1_path), ("Rồng 2", p2_path)]
         best_seen: Dict[str, float] = {"Rồng 1": 0.0, "Rồng 2": 0.0}
@@ -1675,7 +1734,7 @@ class DaoRongBot:
     def _run_loop(self) -> None:
         mode_lbl = "Chỉ Auto Lai" if self.is_breed_only else "Lai + Hóa Bụi"
         ctrl_lbl = f"Chạy Ngầm ADB ({self.adb_serial})" if self.input.is_adb_mode else "Chuột Tự Nhiên"
-        self.log(f"=== BẮT ĐẦU DaoRong_tool v10.4 [{self.account_label}] | {mode_lbl} | {ctrl_lbl} ===")
+        self.log(f"=== BẮT ĐẦU DaoRong_tool v{CURRENT_VERSION} [{self.account_label}] | {mode_lbl} | {ctrl_lbl} ===")
         state = BotState.OPEN_BREED
         idle = self._timing("loop_idle_delay", 0.10)
 
@@ -1714,4 +1773,4 @@ class DaoRongBot:
         finally:
             self.stats.current_state = "Đã dừng"
             self.on_stats(self.stats)
-            self.log(f"=== ĐÃ DỪNG DaoRong_tool v10.4 [{self.account_label}] ===")
+            self.log(f"=== ĐÃ DỪNG DaoRong_tool v{CURRENT_VERSION} [{self.account_label}] ===")

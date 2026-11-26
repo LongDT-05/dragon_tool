@@ -138,17 +138,17 @@ def load_config() -> Dict[str, Any]:
     cfg.setdefault("verbose_log", False)
     # Tự động nâng cấp thông số vuốt thanh rồng & khung quét cho người dùng nâng từ bản cũ (< v11.0)
     # mà vẫn giữ nguyên 100% luật rồng, cặp bố mẹ, ghim tọa độ và hồ sơ!
-    if int(cfg.get("config_schema_version", 0) or 0) < 11:
+    if int(cfg.get("config_schema_version", 0) or 0) < 12:
         drag = cfg.setdefault("drag", {})
         drag["bottom_bar_roi"] = [0.15, 0.62, 0.61, 0.89]
-        drag["bottom_drag_start"] = [0.47, 0.75]
-        drag["bottom_drag_end"] = [0.29, 0.75]
-        drag["drag_duration"] = 0.30
-        drag["drag_hold_end"] = 0.08
+        drag["bottom_drag_start"] = [0.44, 0.75]
+        drag["bottom_drag_end"] = [0.30, 0.75]
+        drag["drag_duration"] = 0.62
+        drag["drag_hold_end"] = 0.14
         drag["result_name_roi"] = [0.57, 0.285, 0.78, 0.348]
         timing = cfg.setdefault("timing", {})
-        timing["scroll_settle_delay"] = 0.24
-        cfg["config_schema_version"] = 11
+        timing["scroll_settle_delay"] = 0.38
+        cfg["config_schema_version"] = 12
         try:
             save_config(cfg)
         except Exception:
