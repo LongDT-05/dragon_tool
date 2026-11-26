@@ -57,8 +57,7 @@ jobs:
           Copy-Item app_icon.ico dist\DaoRong_tool\app_icon.ico -Force
           Copy-Item app_icon.png dist\DaoRong_tool\app_icon.png -Force
           Copy-Item -Recurse -Force templates dist\DaoRong_tool\templates
-          $clsModel = "dist\DaoRong_tool\_internal\rapidocr_onnxruntime\models\ch_ppocr_mobile_v2.0_cls_infer.onnx"
-          if (Test-Path $clsModel) { Remove-Item -Force $clsModel }
+          
 
       - name: Package Release ZIP & version.json
         shell: pwsh
