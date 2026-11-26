@@ -1347,8 +1347,9 @@ class DaoRongStudioV10(ctk.CTk):
         self.combo_p2.configure(values=opts)
         if self.var_p1.get() not in parent_files:
             self.var_p1.set(parent_files[0] if parent_files else "(Chưa có mẫu)")
-        if self.var_p2.get() not in parent_files:
-            self.var_p2.set(parent_files[1] if len(parent_files) > 1 else (parent_files[0] if parent_files else "(Chưa có mẫu)"))
+        if self.var_p2.get() not in parent_files or (len(parent_files) > 1 and self.var_p2.get() == self.var_p1.get()):
+            other = [f for f in parent_files if f != self.var_p1.get()]
+            self.var_p2.set(other[0] if other else (parent_files[0] if parent_files else "(Chưa có mẫu)"))
 
     def _save_all_settings(self, silent: bool = False) -> None:
         try:
@@ -1464,8 +1465,13 @@ class DaoRongStudioV10(ctk.CTk):
 
     def _start_bot(self, restart_from_egg: bool = False) -> None:
         self._save_all_settings(silent=True)
-        if not self.config_data.get("selected_parent_1") or not self.config_data.get("selected_parent_2"):
+        p1 = self.config_data.get("selected_parent_1", "")
+        p2 = self.config_data.get("selected_parent_2", "")
+        if not p1 or not p2:
             messagebox.showwarning("Chưa chọn cặp rồng", "Hãy chụp và chọn đủ 2 rồng bố mẹ trước khi chạy!")
+            return
+        if p1 == p2:
+            messagebox.showwarning("Trùng cặp rồng bố mẹ", "Rồng bố/mẹ 1 và Rồng bố/mẹ 2 đang chọn giống hệt nhau!\nHãy chọn 2 con khác nhau ở 2 ô Bố/Mẹ.")
             return
         if self.config_data.get("control_mode", "windows") == "adb":
             sels = [s for s, v in self.adb_device_vars.items() if v.get()]

@@ -110,29 +110,60 @@ class AdbController:
         if not adb:
             return []
 
-        if auto_connect_ports:
-            # Tự dò cổng LDPlayer / BlueStacks / MuMu đang mở nếu chưa hiện
-            for port in (5555, 5557, 5559, 5561, 7555, 16384):
-                try:
-                    self._run(["connect", f"127.0.0.1:{port}"], timeout=1.2)
-                except Exception:
-                    pass
-
         try:
             proc = self._run(["devices"], timeout=5.0)
             lines = proc.stdout.decode("utf-8", errors="ignore").splitlines()
         except Exception:
-            return []
+            lines = []
 
-        devices: List[AdbDevice] = []
-        idx = 1
+        online_serials: List[str] = []
         for line in lines[1:]:
             parts = line.strip().split()
             if len(parts) >= 2 and parts[1] == "device":
-                serial = parts[0]
-                label = f"Giả lập #{idx} ({serial})"
-                devices.append(AdbDevice(serial=serial, status="online", label=label))
-                idx += 1
+                online_serials.append(parts[0])
+
+        # Chỉ tự connect cổng ngoài (BlueStacks/MuMu/Nox) nếu chưa có thiết bị nào,
+        # TUYỆT ĐỐI không connect 127.0.0.1:5555 khi emulator-5554 đã có (vì là CÙNG 1 cửa sổ LDPlayer!)
+        if auto_connect_ports and not online_serials:
+            for port in (5555, 5557, 5559, 7555, 16384):
+                try:
+                    self._run(["connect", f"127.0.0.1:{port}"], timeout=1.0)
+                except Exception:
+                    pass
+            try:
+                proc = self._run(["devices"], timeout=5.0)
+                lines = proc.stdout.decode("utf-8", errors="ignore").splitlines()
+                for line in lines[1:]:
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[1] == "device" and parts[0] not in online_serials:
+                        online_serials.append(parts[0])
+            except Exception:
+                pass
+
+        # Khử trùng lặp cặp LDPlayer: emulator-(5554+2k) và 127.0.0.1:(5555+2k) là CÙNG 1 giả lập!
+        emu_ports = set()
+        for s in online_serials:
+            if s.startswith("emulator-"):
+                try:
+                    emu_ports.add(int(s.split("-")[1]))
+                except ValueError:
+                    pass
+
+        deduped: List[str] = []
+        for s in online_serials:
+            if s.startswith("127.0.0.1:"):
+                try:
+                    p = int(s.split(":")[1])
+                    if (p - 1) in emu_ports:
+                        continue  # Bỏ qua bản sao trùng của emulator-(p-1)!
+                except ValueError:
+                    pass
+            if s not in deduped:
+                deduped.append(s)
+
+        devices: List[AdbDevice] = []
+        for idx, serial in enumerate(deduped, 1):
+            devices.append(AdbDevice(serial=serial, status="online", label=f"Giả lập #{idx} ({serial})"))
         return devices
 
     def capture_screen(self, serial: str) -> Optional[np.ndarray]:
