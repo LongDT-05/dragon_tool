@@ -541,3 +541,24 @@ class RareMomentSaver:
         h, w = img_bgr.shape[:2]
         out_img = cv2.resize(img_bgr, (960, int(h * 960 / w))) if w > 960 else img_bgr
         imwrite_unicode(self.out_dir / fname, out_img)
+
+
+# ======================================================================
+# 7. GHI NHỚ HƯỚNG TÌM CẶP BỐ MẸ (TĂNG TỐC TÌM RỒNG LẦN SAU)
+# ======================================================================
+class PairDirectionMemory:
+    """Ghi nhớ hướng vuốt thành công gần nhất ('right' hoặc 'left') cho từng cặp bố mẹ."""
+
+    def __init__(self) -> None:
+        self._mem: Dict[str, str] = {}
+
+    @staticmethod
+    def _key(p1: str, p2: str) -> str:
+        return f"{p1}||{p2}"
+
+    def preferred_direction(self, p1: str, p2: str) -> str:
+        return self._mem.get(self._key(p1, p2), "right")
+
+    def record(self, p1: str, p2: str, direction: str) -> None:
+        if direction in ("right", "left"):
+            self._mem[self._key(p1, p2)] = direction

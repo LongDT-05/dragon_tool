@@ -33,6 +33,8 @@ except ImportError:
     winsound = None
 
 from adb_controller import AdbController
+from notifier import AlertNotifier
+from yolo_vision import YoloLevel2Vision
 from bot_engine import BotStats, DaoRongBot
 from capture_tool import capture_region_overlay, pick_point_overlay, select_box_overlay
 from ocr_engine import DragonTextMatcher, format_rule_string, load_dragon_catalog, normalize_vn
@@ -194,6 +196,7 @@ class DaoRongStudioV10(ctk.CTk):
         self.shared_calibrator = AnchorAutoCalibrator()
         self.shared_pair_stats = PairStatsTracker(BASE_DIR / "pair_stats.json")
         self.rule_parser = NaturalRuleParser(self.catalog)
+        self.shared_yolo = YoloLevel2Vision(BASE_DIR / "models")
 
         self._mini_hud: Optional[ctk.CTkToplevel] = None
         self._hud_lbl_status: Optional[ctk.CTkLabel] = None
@@ -754,6 +757,11 @@ class DaoRongStudioV10(ctk.CTk):
         self.var_sound_alert = tk.BooleanVar(value=bool(self.config_data.get("sound_alert", True)))
         self.var_verbose_log = tk.BooleanVar(value=bool(self.config_data.get("verbose_log", False)))
         self.var_collect_ai = tk.BooleanVar(value=bool(self.config_data.get("collect_ai_dataset", False)))
+        self.var_watchdog_relaunch = tk.BooleanVar(value=bool(self.config_data.get("watchdog_relaunch", True)))
+        self.var_remote_notify = tk.BooleanVar(value=bool(self.config_data.get("enable_remote_notify", False)))
+        self.var_tg_token = tk.StringVar(value=str(self.config_data.get("telegram_token", "")))
+        self.var_tg_chat = tk.StringVar(value=str(self.config_data.get("telegram_chat_id", "")))
+        self.var_dc_webhook = tk.StringVar(value=str(self.config_data.get("discord_webhook", "")))
 
         # Nhóm Hóa Bụi An Toàn
         c1 = ctk.CTkFrame(sc_b, corner_radius=10, fg_color=C["console"], border_width=1, border_color=C["border"])
@@ -861,15 +869,39 @@ class DaoRongStudioV10(ctk.CTk):
         ctk.CTkSwitch(asw, text="Phân biệt rồng theo màu sắc", variable=self.var_color_check, font=ctk.CTkFont("Segoe UI", 11)).pack(anchor="w", pady=2)
         ctk.CTkSwitch(asw, text="Tự động co giãn ảnh mẫu theo kích thước giả lập", variable=self.var_auto_scale, font=ctk.CTkFont("Segoe UI", 11)).pack(anchor="w", pady=2)
         ctk.CTkSwitch(asw, text="Bật nhận diện tên (OCR 63 rồng + AI tự học)", variable=self.var_enable_ocr, font=ctk.CTkFont("Segoe UI", 11)).pack(anchor="w", pady=2)
-        ctk.CTkSwitch(asw, text="Thu thập mẫu ảnh tự động để train AI YOLOv8-nano (trần 300 ảnh vào ai_dataset/)", variable=self.var_collect_ai, font=ctk.CTkFont("Segoe UI", 11)).pack(anchor="w", pady=2)
+        ctk.CTkSwitch(asw, text="Thu thập mẫu ảnh tự động để train AI Cấp 2 YOLOv8-nano (trần 300 ảnh vào ai_dataset/)", variable=self.var_collect_ai, font=ctk.CTkFont("Segoe UI", 11)).pack(anchor="w", pady=2)
+        ctk.CTkSwitch(asw, text="Watchdog 24/7: Tự mở lại game qua ADB nếu bị văng ra màn hình chính", variable=self.var_watchdog_relaunch, font=ctk.CTkFont("Segoe UI", 11)).pack(anchor="w", pady=2)
 
         amr = ctk.CTkFrame(adv, fg_color="transparent")
-        amr.pack(fill="x", padx=12, pady=(2, 10))
-        self.lbl_ai_cache_info = ctk.CTkLabel(amr, text=f"Bộ nhớ AI: {self.shared_name_cache.count}/{PersistentNameCache.MAX_ENTRIES} mẫu (<1MB)", font=ctk.CTkFont("Segoe UI", 11, "bold"), text_color=C["accent"])
+        amr.pack(fill="x", padx=12, pady=(2, 4))
+        self.lbl_ai_cache_info = ctk.CTkLabel(amr, text=f"AI Cấp 1: {self.shared_name_cache.count}/{PersistentNameCache.MAX_ENTRIES} mẫu (<1MB)", font=ctk.CTkFont("Segoe UI", 11, "bold"), text_color=C["accent"])
         self.lbl_ai_cache_info.pack(side="left")
-        ctk.CTkButton(amr, text="Dọn bộ nhớ AI", width=110, height=26, fg_color="#3B0D16", hover_color=C["red"], text_color="#FDA4AF", command=self._clear_ai_cache).pack(side="right", padx=(6, 0))
-        ctk.CTkButton(amr, text="Ảnh Rồng Quý", width=105, height=26, fg_color="#064E3B", command=self._open_rare_shots_folder).pack(side="right", padx=(6, 0))
-        ctk.CTkButton(amr, text="Lưu cỡ giả lập", width=105, height=26, fg_color=C["primary"], command=self._record_reference_size).pack(side="right")
+        ctk.CTkButton(amr, text="Dọn bộ nhớ AI", width=104, height=26, fg_color="#3B0D16", hover_color=C["red"], text_color="#FDA4AF", command=self._clear_ai_cache).pack(side="right", padx=(6, 0))
+        ctk.CTkButton(amr, text="Ảnh Rồng Quý", width=100, height=26, fg_color="#064E3B", command=self._open_rare_shots_folder).pack(side="right", padx=(6, 0))
+        ctk.CTkButton(amr, text="Lưu cỡ giả lập", width=100, height=26, fg_color=C["primary"], command=self._record_reference_size).pack(side="right")
+
+        yrow = ctk.CTkFrame(adv, fg_color="transparent")
+        yrow.pack(fill="x", padx=12, pady=(0, 10))
+        y_col = C["green"] if self.shared_yolo.ready else C["sub"]
+        ctk.CTkLabel(yrow, text=f"AI Cấp 2 (YOLOv8-nano): {self.shared_yolo.status_text}", font=ctk.CTkFont("Segoe UI", 11, "bold"), text_color=y_col).pack(side="left")
+        ctk.CTkButton(yrow, text="Mở thư mục models/", width=130, height=24, fg_color=C["card2"], command=self._open_models_folder).pack(side="right")
+
+        # Thẻ Thông Báo Điện Thoại (Telegram / Discord)
+        ntf = ctk.CTkFrame(sc_a, corner_radius=10, fg_color=C["console"], border_width=1, border_color=C["border"])
+        ntf.pack(fill="x", pady=(0, 8))
+        nh = ctk.CTkFrame(ntf, fg_color="transparent")
+        nh.pack(fill="x", padx=12, pady=(8, 4))
+        ctk.CTkLabel(nh, text="THÔNG BÁO VỀ ĐIỆN THOẠI (TELEGRAM / DISCORD)", font=ctk.CTkFont("Segoe UI", 11, "bold"), text_color=C["accent"]).pack(side="left")
+        ctk.CTkButton(nh, text="Gửi thử", width=74, height=24, corner_radius=6, fg_color=C["primary"], font=ctk.CTkFont("Segoe UI", 11, "bold"), command=self._test_remote_notify).pack(side="right")
+        ctk.CTkSwitch(ntf, text="Gửi ảnh chụp về điện thoại khi nổ rồng Chúc phúc / Cực hiếm / Event hoặc khi lỗi dừng", variable=self.var_remote_notify, font=ctk.CTkFont("Segoe UI", 11)).pack(anchor="w", padx=12, pady=(0, 6))
+        ng = ctk.CTkFrame(ntf, fg_color="transparent")
+        ng.pack(fill="x", padx=12, pady=(0, 10))
+        ctk.CTkLabel(ng, text="Telegram Token:", font=ctk.CTkFont("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w", pady=3, padx=(0, 8))
+        ctk.CTkEntry(ng, textvariable=self.var_tg_token, width=250, fg_color=C["card"], placeholder_text="123456:ABC...").grid(row=0, column=1, sticky="w", pady=3, padx=(0, 12))
+        ctk.CTkLabel(ng, text="Chat ID:", font=ctk.CTkFont("Segoe UI", 11, "bold")).grid(row=0, column=2, sticky="w", pady=3, padx=(0, 6))
+        ctk.CTkEntry(ng, textvariable=self.var_tg_chat, width=120, fg_color=C["card"], placeholder_text="VD: 987654321").grid(row=0, column=3, sticky="w", pady=3)
+        ctk.CTkLabel(ng, text="Discord Webhook:", font=ctk.CTkFont("Segoe UI", 11, "bold")).grid(row=1, column=0, sticky="w", pady=3, padx=(0, 8))
+        ctk.CTkEntry(ng, textvariable=self.var_dc_webhook, width=440, fg_color=C["card"], placeholder_text="https://discord.com/api/webhooks/...").grid(row=1, column=1, columnspan=3, sticky="w", pady=3)
 
         cal = ctk.CTkFrame(sc_a, corner_radius=10, fg_color=C["console"], border_width=1, border_color=C["border"])
         cal.pack(fill="x", pady=(0, 8))
@@ -1725,6 +1757,30 @@ class DaoRongStudioV10(ctk.CTk):
                 self.after(0, lambda: (win.destroy(), messagebox.showerror("Lỗi cập nhật", str(exc))))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _open_models_folder(self) -> None:
+        folder = BASE_DIR / "models"
+        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            os.startfile(str(folder))
+        except Exception:
+            messagebox.showinfo("Thư mục AI Cấp 2", str(folder), parent=self)
+
+    def _test_remote_notify(self) -> None:
+        self._save_settings_from_ui(silent=True)
+        ntf = AlertNotifier(
+            telegram_token=self.var_tg_token.get().strip(),
+            telegram_chat_id=self.var_tg_chat.get().strip(),
+            discord_webhook=self.var_dc_webhook.get().strip(),
+            enabled=True,
+        )
+        def _run() -> None:
+            ok, msg = ntf.send_test()
+            self.after(0, lambda: (
+                messagebox.showinfo("Thông báo điện thoại", msg, parent=self)
+                if ok else messagebox.showwarning("Lỗi gửi thông báo", msg, parent=self)
+            ))
+        threading.Thread(target=_run, daemon=True).start()
 
     def _on_close(self) -> None:
         self.on_stop_all()

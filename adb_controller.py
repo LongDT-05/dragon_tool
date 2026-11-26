@@ -236,3 +236,32 @@ class AdbController:
             serial=serial,
             timeout=4.0,
         )
+
+    def get_foreground_package(self, serial: str) -> str:
+        """Lấy tên package ứng dụng đang mở trên màn hình Android (dùng cho Watchdog 24/7)."""
+        import re as _re
+        try:
+            proc = self._run(["shell", "dumpsys", "window", "windows"], serial=serial, timeout=3.5)
+            out = proc.stdout.decode("utf-8", errors="ignore")
+            for pat in (r"mCurrentFocus=Window\{[^\}]+\s+([a-zA-Z0-9_\.]+)/", r"mFocusedApp=.*?([a-zA-Z0-9_\.]+)/"):
+                m = _re.search(pat, out)
+                if m:
+                    return m.group(1)
+        except Exception:
+            pass
+        return ""
+
+    def relaunch_package(self, serial: str, package_name: str) -> bool:
+        """Tự động mở lại game nếu bị văng ra màn hình chính Android."""
+        pkg = (package_name or "").strip()
+        if not pkg:
+            return False
+        try:
+            self._run(
+                ["shell", "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1"],
+                serial=serial,
+                timeout=6.0,
+            )
+            return True
+        except Exception:
+            return False

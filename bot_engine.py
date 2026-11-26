@@ -25,14 +25,17 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from actions import InputController
 from ocr_engine import DragonTextMatcher, load_dragon_catalog, normalize_vn
 import random
+from notifier import AlertNotifier
 from smart_ai import (
     AnchorAutoCalibrator,
     OcrAdaptiveDictionary,
+    PairDirectionMemory,
     PairStatsTracker,
     PersistentNameCache,
     RareMomentSaver,
     TrainingDatasetCollector,
 )
+from yolo_vision import YoloLevel2Vision
 from updater import CURRENT_VERSION
 from vision import MatchResult, VisionEngine, WindowRect, compute_frame_diff, compute_frame_similarity, imread_unicode
 
@@ -163,6 +166,16 @@ class DaoRongBot:
         self._session_dust_ledger: Dict[Tuple[str, int], int] = {}
         self._wd_last_frame = None
         self._wd_last_change_ts = 0.0
+        self.dir_memory = PairDirectionMemory()
+        self.yolo = YoloLevel2Vision(self.base_dir / "models")
+        self.notifier = AlertNotifier(
+            telegram_token=config.get("telegram_token", ""),
+            telegram_chat_id=config.get("telegram_chat_id", ""),
+            discord_webhook=config.get("discord_webhook", ""),
+            enabled=bool(config.get("enable_remote_notify", False)),
+        )
+        self._game_package = str(config.get("adb_game_package", "") or "").strip()
+        self._watchdog_relaunch_count = 0
 
     @property
     def is_running(self) -> bool:
@@ -605,7 +618,69 @@ class DaoRongBot:
     # ------------------------------------------------------------------
     # Bước 1: Mở bảng Lai Rồng (Chống rồng bay che trứng)
     # ------------------------------------------------------------------
+    def _read_resource_ratio(
+        self, screen: np.ndarray, rect: WindowRect, roi_rel: List[float]
+    ) -> Optional[Tuple[int, int]]:
+        """Đọc cặp số 'A/B' trên thanh 'Cần: A/B' (Ngọc lai hoặc Đá chúc phúc) bằng OCR."""
+        import re as _re
+        if not self.text_matcher.is_available:
+            return None
+        try:
+            crop, _, _ = self.vision.crop_roi(screen, rect, roi_rel)
+            if crop is None or crop.size == 0:
+                return None
+            txt = self.text_matcher.read_name_crop(crop) or ""
+            m = _re.search(r"(\d[\d.,]*)\s*/\s*(\d[\d.,]*)", txt)
+            if m:
+                a = int(_re.sub(r"[^\d]", "", m.group(1)) or "0")
+                b = int(_re.sub(r"[^\d]", "", m.group(2)) or "0")
+                return a, b
+        except Exception:
+            pass
+        return None
+
+    def _watchdog_record_game_pkg(self) -> None:
+        """Tự ghi nhớ tên package Đảo Rồng trên Android lần đầu chạy ADB."""
+        if self.adb is None or not self.adb_serial or self._game_package:
+            return
+        try:
+            pkg = self.adb.get_foreground_package(self.adb_serial)
+            if pkg and not any(k in pkg.lower() for k in ("launcher", "systemui", "settings", "android.desk")):
+                self._game_package = pkg
+                self.config["adb_game_package"] = pkg
+                self.log_tech(f"[WATCHDOG 24/7] Đã ghi nhận package game: {pkg}")
+        except Exception:
+            pass
+
+    def _watchdog_check_and_relaunch(self) -> bool:
+        """Watchdog 24/7: phát hiện game văng ra màn hình chính Android -> tự mở lại game & chạy tiếp!"""
+        if self.adb is None or not self.adb_serial or not self.config.get("watchdog_relaunch", True):
+            return False
+        if not self._game_package:
+            self._watchdog_record_game_pkg()
+            if not self._game_package:
+                return False
+        try:
+            cur = self.adb.get_foreground_package(self.adb_serial)
+            if cur and cur != self._game_package and any(
+                k in cur.lower() for k in ("launcher", "home", "systemui", "android.desk")
+            ):
+                self._watchdog_relaunch_count += 1
+                self.log(f"🔄 [WATCHDOG 24/7] Phát hiện game bị văng ({cur}) -> Tự mở lại {self._game_package}!")
+                self.notifier.send_async(
+                    f"🔄 [{self.account_label}] Game bị văng ra màn hình chính -> Watchdog đang tự mở lại game (lần #{self._watchdog_relaunch_count})."
+                )
+                if self.adb.relaunch_package(self.adb_serial, self._game_package):
+                    self.input.sleep_interruptible(12.0, self.should_stop)
+                    self._dismiss_stray_popups(max_clicks=3)
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _is_on_dust_island(self, screen: np.ndarray, rect: WindowRect) -> bool:
+        if self.yolo.ready and self.yolo.find_best(screen, "altar", conf_thr=0.48) is not None:
+            return True
         altar_p = self._ui("btn_altar_center.png")
         if altar_p.is_file():
             return self.vision.find_template(altar_p, threshold=0.68, screen_bgr=screen, rect=rect).found
@@ -648,6 +723,7 @@ class DaoRongBot:
 
     def _step_open_breed(self) -> BotState:
         self._set_state(BotState.OPEN_BREED)
+        self._watchdog_record_game_pkg()
         screen, rect = self.vision.capture_window()
 
         if self._check_bag_full(screen, rect):
@@ -713,7 +789,11 @@ class DaoRongBot:
             self._dismiss_stray_popups(max_clicks=1)
             self.input.sleep_interruptible(0.30, self.should_stop)
 
-        self.log("[PHỤC HỒI] Không mở được trứng -> Tự dò lại đảo...")
+        self.log("[PHỤC HỒI] Không mở được trứng -> Kiểm tra Watchdog & tự dò lại đảo...")
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= 2 and self._watchdog_check_and_relaunch():
+            self._consecutive_failures = 0
+            return BotState.OPEN_BREED
         self._scan_islands_for_egg()
         self.stats.recoveries += 1
         self.on_stats(self.stats)
@@ -834,13 +914,20 @@ class DaoRongBot:
             return True
 
         half = max(3, max_scrolls // 2)
-        directions = [
-            ("kéo sang phải", start_rel, end_rel, half),
-            ("kéo ngược sang trái", end_rel, start_rel, max_scrolls),
-        ]
+        pref_dir = self.dir_memory.preferred_direction(p1_path.name, p2_path.name)
+        if pref_dir == "left":
+            directions = [
+                ("left", "kéo sang trái (hướng nhớ)", end_rel, start_rel, half),
+                ("right", "kéo ngược sang phải", start_rel, end_rel, max_scrolls),
+            ]
+        else:
+            directions = [
+                ("right", "kéo sang phải", start_rel, end_rel, half),
+                ("left", "kéo ngược sang trái", end_rel, start_rel, max_scrolls),
+            ]
 
         prev_scr, prev_rect = scr0, rect0
-        for dir_name, p_from, p_to, limit in directions:
+        for dir_code, dir_name, p_from, p_to, limit in directions:
             stuck_count = 0
             for step in range(1, limit + 1):
                 if not need:
@@ -865,6 +952,7 @@ class DaoRongBot:
                 _try_pick_visible(after_scr, after_rect)
                 prev_scr, prev_rect = after_scr, after_rect
                 if not need:
+                    self.dir_memory.record(p1_path.name, p2_path.name, dir_code)
                     return True
 
                 if compute_frame_diff(before_roi, after_roi) < 2.2:
@@ -1131,6 +1219,24 @@ class DaoRongBot:
                     self.stats.sold += 1
 
         elif action == "bless":
+            # Kiểm tra nhanh Đá Chúc Phúc (Cần: need/have) -> nếu không đủ đá thì Cất ngay để không mất rồng quý!
+            bless_ratio = self._read_resource_ratio(screen, rect, [0.23, 0.54, 0.44, 0.64])
+            if bless_ratio is not None:
+                need_st, have_st = bless_ratio
+                if need_st > 0 and have_st < need_st:
+                    self.log(f"⚠️ [HẾT ĐÁ CHÚC PHÚC] Cần {need_st} nhưng chỉ còn {have_st} -> Tự chuyển sang Cất rồng để giữ rồng quý!")
+                    self.notifier.send_async(
+                        f"⚠️ [{self.account_label}] Hết Đá Chúc Phúc ({have_st}/{need_st})! Đã tự động Cất rồng quý thay thế.",
+                        screen,
+                    )
+                    action = "keep"
+                    cached_k2 = self._cached_result_btns.get("btn_keep.png")
+                    if cached_k2 is not None:
+                        self.input.click(cached_k2[0], cached_k2[1], post_delay=0.16 * self._spd, stop_check=self.should_stop)
+                    else:
+                        self._click_ui("btn_keep.png", timeout=3.0, post_delay=0.16 * self._spd)
+                    self.stats.kept += 1
+        if action == "bless":
             cached_b = self._cached_result_btns.get("btn_bless.png")
             clicked_b = False
             if cached_b is not None:
@@ -1195,6 +1301,13 @@ class DaoRongBot:
             })
             if len(self.stats.recent_drops) > 30:
                 self.stats.recent_drops.pop()
+            if action == "bless" or id_rarity in ("Cực hiếm", "Event"):
+                st_lbl = f" ({id_stars}★)" if id_stars else ""
+                act_lbl = "Chúc phúc & Cất" if action == "bless" else action.upper()
+                self.notifier.send_async(
+                    f"🐉 [{self.account_label}] Nổ rồng quý: {id_name or 'Rồng Chúc Phúc'}{st_lbl} [{id_rarity or 'Quý'}] → {act_lbl}!",
+                    screen,
+                )
             if self.config.get("save_rare_snapshots", True) and (id_rarity in ("Cực hiếm", "Event") or action == "bless"):
                 self.rare_saver.save_shot(screen, id_name or "Rong_Quy", id_stars)
 
