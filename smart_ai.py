@@ -407,3 +407,126 @@ class PairStatsTracker:
     def clear(self) -> None:
         self.data.clear()
         self._save()
+
+
+# ======================================================================
+# 5. AI TỰ HỌC LỖI ĐỌC CHỮ THEO MÁY (OCR ADAPTIVE DICTIONARY, ~5KB)
+# ======================================================================
+class OcrAdaptiveDictionary:
+    """Ghi nhớ ánh xạ chuỗi OCR hay đọc lệch trên máy người dùng -> tên rồng chuẩn (trần 200 mục)."""
+
+    MAX_ENTRIES = 200
+
+    def __init__(self, map_path: Path):
+        self.map_path = Path(map_path)
+        self.entries: Dict[str, str] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if self.map_path.is_file():
+            try:
+                data = json.loads(self.map_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    self.entries = {str(k): str(v) for k, v in data.items()}
+            except Exception:
+                self.entries = {}
+
+    def _save(self) -> None:
+        try:
+            self.map_path.write_text(json.dumps(self.entries, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _clean_key(raw_text: str) -> str:
+        # Bỏ phần (20 sao) chỉ lấy phần tên để khớp được mọi số sao
+        base_part = re.split(r"[\(\[]", raw_text or "", maxsplit=1)[0]
+        return normalize_vn(base_part)
+
+    def lookup(self, raw_text: str) -> Optional[str]:
+        k = self._clean_key(raw_text)
+        if not k or len(k) < 5:
+            return None
+        return self.entries.get(k)
+
+    def learn(self, raw_text: str, canonical_name: str) -> None:
+        k = self._clean_key(raw_text)
+        if not k or len(k) < 5 or not canonical_name:
+            return
+        if k == normalize_vn(canonical_name):
+            return  # Đã khớp nguyên bản thì không cần lưu thừa
+        if k in self.entries:
+            return
+        if len(self.entries) >= self.MAX_ENTRIES:
+            oldest = next(iter(self.entries))
+            self.entries.pop(oldest, None)
+        self.entries[k] = canonical_name
+        self._save()
+
+    def clear(self) -> int:
+        n = len(self.entries)
+        self.entries.clear()
+        if self.map_path.is_file():
+            self.map_path.unlink(missing_ok=True)
+        return n
+
+
+# ======================================================================
+# 6. TỰ GOM MẪU ẢNH TRAIN YOLO (TẮT MẶC ĐỊNH, TRẦN 300 ẢNH)
+# ======================================================================
+class TrainingDatasetCollector:
+    """Tự động lưu ảnh tình huống khó (rồng che, popup lạ, OCR mờ) để sau này train YOLOv8-nano."""
+
+    MAX_IMAGES = 300
+
+    def __init__(self, out_dir: Path):
+        self.out_dir = Path(out_dir)
+        self._last_save_ts = 0.0
+
+    def count(self) -> int:
+        if not self.out_dir.is_dir():
+            return 0
+        return sum(1 for _ in self.out_dir.glob("*.jpg"))
+
+    def save_sample(self, img_bgr: np.ndarray, tag: str) -> bool:
+        if img_bgr is None or img_bgr.size == 0:
+            return False
+        now = time.monotonic()
+        if now - self._last_save_ts < 4.0:
+            return False  # Tránh lưu trùng nhiều khung hình liên tiếp
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        existing = sorted(self.out_dir.glob("*.jpg"), key=lambda p: p.stat().st_mtime)
+        while len(existing) >= self.MAX_IMAGES:
+            existing.pop(0).unlink(missing_ok=True)
+        fname = f"{tag}_{time.strftime('%Y%m%d_%H%M%S')}.jpg"
+        ok = imwrite_unicode(self.out_dir / fname, img_bgr)
+        if ok:
+            self._last_save_ts = now
+        return ok
+
+
+# ======================================================================
+# 7. TỰ LƯU ẢNH KHOẢNH KHẮC RỒNG QUÝ (TRẦN 30 ẢNH MỚI NHẤT)
+# ======================================================================
+class RareMomentSaver:
+    """Lưu ảnh chụp nhỏ khi nổ Cực hiếm / Event / Chúc phúc (giới hạn 30 ảnh gần nhất)."""
+
+    MAX_SHOTS = 30
+
+    def __init__(self, out_dir: Path):
+        self.out_dir = Path(out_dir)
+
+    def save_shot(self, img_bgr: np.ndarray, dragon_name: str, stars: Optional[int] = None) -> None:
+        if img_bgr is None or img_bgr.size == 0:
+            return
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        existing = sorted(self.out_dir.glob("*.jpg"), key=lambda p: p.stat().st_mtime)
+        while len(existing) >= self.MAX_SHOTS:
+            existing.pop(0).unlink(missing_ok=True)
+        safe = re.sub(r"[^a-z0-9_]+", "_", normalize_vn(dragon_name or "rong_quy")).strip("_")[:30]
+        st = f"_{stars}sao" if stars else ""
+        fname = f"{time.strftime('%Y%m%d_%H%M%S')}_{safe}{st}.jpg"
+        # Thu nhỏ nhẹ nếu quá to để mỗi ảnh chỉ ~40-60KB
+        h, w = img_bgr.shape[:2]
+        out_img = cv2.resize(img_bgr, (960, int(h * 960 / w))) if w > 960 else img_bgr
+        imwrite_unicode(self.out_dir / fname, out_img)

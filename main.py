@@ -10,6 +10,7 @@ Phím tắt: CTRL + ENTER = Bắt đầu / Dừng | ESC = Dừng khẩn cấp.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import tkinter as tk
@@ -139,8 +140,8 @@ class DaoRongStudioV7(ctk.CTk):
         ensure_directories()
 
         self.title(f"DaoRong_tool v{CURRENT_VERSION}")
-        self.geometry("1100x750")
-        self.minsize(980, 660)
+        self.geometry("900x610")
+        self.minsize(840, 560)
         self.configure(fg_color=C["bg"])
 
         ico_file = BASE_DIR / "app_icon.ico"
@@ -188,7 +189,7 @@ class DaoRongStudioV7(ctk.CTk):
     # Khung giao diện chính: Sidebar trái + Khu nội dung phải
     # ------------------------------------------------------------------
     def _build_layout(self) -> None:
-        sidebar = ctk.CTkFrame(self, width=235, corner_radius=0, fg_color=C["sidebar"])
+        sidebar = ctk.CTkFrame(self, width=185, corner_radius=0, fg_color=C["sidebar"])
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
 
@@ -247,7 +248,7 @@ class DaoRongStudioV7(ctk.CTk):
             text="Đang tự tìm giả lập...",
             font=ctk.CTkFont("Segoe UI", 12, "bold"),
             text_color=C["amber"],
-            wraplength=185,
+            wraplength=145,
             justify="left",
         )
         self.lbl_ld_status.pack(anchor="w", padx=12, pady=(0, 8))
@@ -299,6 +300,15 @@ class DaoRongStudioV7(ctk.CTk):
                 fg_color=C["card2"] if k == key else "transparent",
                 text_color=C["cyan"] if k == key else C["muted"],
             )
+
+    def _help_btn(self, parent, title: str, guide_text: str):
+        """Nút '?' nhỏ gọn đặt cạnh từng tính năng — bấm vào hiện ngay hướng dẫn dễ hiểu."""
+        return ctk.CTkButton(
+            parent, text="?", width=22, height=22, corner_radius=11,
+            fg_color=C["card2"], hover_color="#0284c7", text_color=C["cyan"],
+            font=ctk.CTkFont("Segoe UI", 11, "bold"),
+            command=lambda t=title, g=guide_text: messagebox.showinfo(f"Hướng dẫn: {t}", g, parent=self),
+        )
 
     def _tip_banner(self, parent, text: str) -> None:
         box = ctk.CTkFrame(parent, corner_radius=10, fg_color="#0c233a", border_width=1, border_color="#1d4ed8")
@@ -376,7 +386,7 @@ class DaoRongStudioV7(ctk.CTk):
         ctk.CTkLabel(m_grid, text="Chế độ chạy:", font=ctk.CTkFont("Segoe UI", 12, "bold"), text_color=C["cyan"]).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
         ctk.CTkSegmentedButton(
             m_grid, values=["Lai + Hóa Bụi", "Chỉ Auto Lai (Săn Rồng)"],
-            variable=self.var_bot_mode_vn, width=320, corner_radius=8,
+            variable=self.var_bot_mode_vn, width=240, corner_radius=8,
             command=lambda _v: self._on_mode_changed()
         ).grid(row=0, column=1, sticky="w", padx=(0, 16), pady=4)
 
@@ -388,7 +398,7 @@ class DaoRongStudioV7(ctk.CTk):
         ctk.CTkLabel(m_grid, text="Điều khiển:", font=ctk.CTkFont("Segoe UI", 12, "bold"), text_color=C["cyan"]).grid(row=0, column=2, sticky="w", padx=(0, 8), pady=4)
         ctk.CTkSegmentedButton(
             m_grid, values=["Chuột Tự Nhiên", "Chạy Ngầm / Nhiều Acc (ADB)"],
-            variable=self.var_ctrl_mode_vn, width=310, corner_radius=8,
+            variable=self.var_ctrl_mode_vn, width=235, corner_radius=8,
             command=lambda _v: self._on_ctrl_mode_changed()
         ).grid(row=0, column=3, sticky="w", pady=4)
 
@@ -397,7 +407,12 @@ class DaoRongStudioV7(ctk.CTk):
             text="💡 Chế độ Lai + Hóa Bụi: tự động lai liên tục, đầy túi tự sang đảo hóa bụi rồng Nguyên liệu (tự né rồng bị khóa 🔒) rồi quay lại.",
             font=ctk.CTkFont("Segoe UI", 11), text_color=C["muted"], anchor="w", justify="left"
         )
-        self.lbl_mode_hint.pack(fill="x", padx=16, pady=(0, 8))
+        m_hint_row = ctk.CTkFrame(card_mode, fg_color="transparent")
+        m_hint_row.pack(fill="x", padx=16, pady=(0, 8))
+        self.lbl_mode_hint.pack_forget()
+        self.lbl_mode_hint = ctk.CTkLabel(m_hint_row, text="", font=ctk.CTkFont("Segoe UI", 11), text_color=C["muted"], anchor="w", justify="left", wraplength=590)
+        self.lbl_mode_hint.pack(side="left", fill="x", expand=True)
+        self._help_btn(m_hint_row, "Chế độ chạy & Chạy Ngầm ADB", "• Lai + Hóa Bụi: đầy túi tự sang đảo Tẩy Tủy hóa bụi (tự né rồng khóa 🔒).\n• Chỉ Auto Lai: chuyên săn rồng hiếm / làm nhiệm vụ, đầy túi tự dừng & báo chuông.\n• Chạy Ngầm ADB: bật Gỡ lỗi ADB 1 lần trong LDPlayer để treo ngầm không chiếm chuột và chạy nhiều acc cùng lúc!").pack(side="right", padx=(6, 0))
 
         self.adb_panel = ctk.CTkFrame(card_mode, corner_radius=10, fg_color=C["console"], border_width=1, border_color=C["border"])
         adb_hdr = ctk.CTkFrame(self.adb_panel, fg_color="transparent")
@@ -424,6 +439,7 @@ class DaoRongStudioV7(ctk.CTk):
         top_bar = ctk.CTkFrame(card_pair, fg_color="transparent")
         top_bar.pack(fill="x", padx=16, pady=(10, 4))
         ctk.CTkLabel(top_bar, text="CHỌN 2 RỒNG ĐỂ LAI CỐ ĐỊNH", font=ctk.CTkFont("Segoe UI", 12, "bold"), text_color=C["cyan"]).pack(side="left")
+        self._help_btn(top_bar, "Chọn 2 rồng bố mẹ", "1. Mở bảng Lai Rồng trong game.\n2. Bấm '+ Chụp rồng lai mới' và khoanh gọn từng con ở thanh dưới.\n3. Chọn Rồng 1 và Rồng 2 ở 2 ô bên dưới — tool sẽ tự cuộn tìm và lai cố định cặp này.").pack(side="left", padx=(6, 0))
         ctk.CTkButton(
             top_bar, text="🔄 Đặt lại cặp rồng", width=130, height=28, corner_radius=8,
             fg_color=C["card2"], hover_color=C["border"], text_color=C["amber"],
@@ -440,12 +456,12 @@ class DaoRongStudioV7(ctk.CTk):
 
         ctk.CTkLabel(grid, text="Rồng bố/mẹ 1:", text_color=C["text"]).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
         self.var_p1 = tk.StringVar(value=self.config_data.get("selected_parent_1", ""))
-        self.combo_p1 = ctk.CTkOptionMenu(grid, variable=self.var_p1, values=[""], width=240, corner_radius=8, fg_color=C["console"], button_color=C["card2"])
+        self.combo_p1 = ctk.CTkOptionMenu(grid, variable=self.var_p1, values=[""], width=195, corner_radius=8, fg_color=C["console"], button_color=C["card2"])
         self.combo_p1.grid(row=0, column=1, padx=(0, 18), pady=4)
 
         ctk.CTkLabel(grid, text="Rồng bố/mẹ 2:", text_color=C["text"]).grid(row=0, column=2, sticky="w", padx=(0, 8), pady=4)
         self.var_p2 = tk.StringVar(value=self.config_data.get("selected_parent_2", ""))
-        self.combo_p2 = ctk.CTkOptionMenu(grid, variable=self.var_p2, values=[""], width=240, corner_radius=8, fg_color=C["console"], button_color=C["card2"])
+        self.combo_p2 = ctk.CTkOptionMenu(grid, variable=self.var_p2, values=[""], width=195, corner_radius=8, fg_color=C["console"], button_color=C["card2"])
         self.combo_p2.grid(row=0, column=3, pady=4)
 
         ctk.CTkLabel(grid, text="Rồng chưa có luật:", text_color=C["muted"]).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
@@ -453,7 +469,7 @@ class DaoRongStudioV7(ctk.CTk):
         self._unk_map_from_vn = {v: k for k, v in self._unk_map_to_vn.items()}
         self.var_unknown_vn = tk.StringVar(value=self._unk_map_to_vn.get(self.config_data.get("unknown_dragon_action", "keep"), "Cất an toàn"))
         ctk.CTkSegmentedButton(
-            grid, values=["Cất an toàn", "Tạm dừng", "Bán luôn"], variable=self.var_unknown_vn, width=240, corner_radius=8
+            grid, values=["Cất an toàn", "Tạm dừng", "Bán luôn"], variable=self.var_unknown_vn, width=195, corner_radius=8
         ).grid(row=1, column=1, sticky="w", pady=4)
 
         ctk.CTkLabel(grid, text="Tốc độ thao tác:", text_color=C["muted"]).grid(row=1, column=2, sticky="w", padx=(0, 8), pady=4)
@@ -461,7 +477,7 @@ class DaoRongStudioV7(ctk.CTk):
         self._spd_from_vn = {v: k for k, v in self._spd_to_vn.items()}
         self.var_speed_vn = tk.StringVar(value=self._spd_to_vn.get(self.config_data.get("speed_preset", "fast"), "Nhanh"))
         ctk.CTkSegmentedButton(
-            grid, values=["Nhanh", "Cân bằng", "Chậm"], variable=self.var_speed_vn, width=240, corner_radius=8
+            grid, values=["Nhanh", "Cân bằng", "Chậm"], variable=self.var_speed_vn, width=195, corner_radius=8
         ).grid(row=1, column=3, sticky="w", pady=4)
 
         # --- THANH ĐIỀU KHIỂN THÔNG MINH ---
@@ -653,6 +669,7 @@ class DaoRongStudioV7(ctk.CTk):
         ai_top = ctk.CTkFrame(ai_card, fg_color="transparent")
         ai_top.pack(fill="x", padx=12, pady=(8, 4))
         ctk.CTkLabel(ai_top, text="✨ AI CÀI LUẬT BẰNG TIẾNG VIỆT (100% offline, miễn phí):", font=ctk.CTkFont("Segoe UI", 12, "bold"), text_color="#93c5fd").pack(side="left")
+        self._help_btn(ai_top, "AI Cài Luật Tiếng Việt", "Gõ 1 câu tiếng Việt bình thường về hành động (Bán / Cất / Chúc phúc / Hóa bụi toàn bộ) + tên rồng hoặc độ hiếm + số sao.\n\nVí dụ:\n• Bán hết phổ biến, cất nguyên liệu, giữ hiếm và cực hiếm\n• Cất và hóa bụi toàn bộ rồng lai ra, chỉ chúc phúc Rồng Lửa Xanh Biển (24 sao)").pack(side="left", padx=(6, 0))
         ctk.CTkButton(
             ai_top, text="Mẫu 1: Cày bụi", width=98, height=24, corner_radius=6, fg_color=C["card2"],
             font=ctk.CTkFont("Segoe UI", 10),
@@ -1009,6 +1026,9 @@ class DaoRongStudioV7(ctk.CTk):
         self.var_human_like = tk.BooleanVar(value=bool(self.config_data.get("human_like_input", True)))
         self.var_sound_alert = tk.BooleanVar(value=bool(self.config_data.get("sound_alert", True)))
         self.var_verbose_log = tk.BooleanVar(value=bool(self.config_data.get("verbose_log", False)))
+        self.var_human_break = tk.BooleanVar(value=bool(self.config_data.get("human_break_enabled", True)))
+        self.var_save_rare = tk.BooleanVar(value=bool(self.config_data.get("save_rare_snapshots", True)))
+        self.var_collect_ai = tk.BooleanVar(value=bool(self.config_data.get("collect_ai_dataset", False)))
 
         c1 = ctk.CTkFrame(sc_basic, corner_radius=12, fg_color=C["console"], border_width=1, border_color=C["border"])
         c1.pack(fill="x", pady=(0, 8))
@@ -1023,7 +1043,7 @@ class DaoRongStudioV7(ctk.CTk):
         ctk.CTkLabel(rar_row, text="Độ hiếm được Hóa Bụi:", font=ctk.CTkFont("Segoe UI", 12, "bold"), text_color=C["text"]).pack(side="left", padx=(0, 10))
         saved_dr = set(self.config_data.get("dust_rarities", ["Nguyên Liệu"]))
         self.var_dust_rars: Dict[str, tk.BooleanVar] = {}
-        for r_lbl in ("Nguyên Liệu", "Hiếm", "Cực hiếm", "Event"):
+        for r_lbl in ("Phổ biến", "Nguyên Liệu", "Hiếm", "Cực hiếm", "Event"):
             v = tk.BooleanVar(value=(r_lbl in saved_dr))
             self.var_dust_rars[r_lbl] = v
             ctk.CTkCheckBox(rar_row, text=r_lbl, variable=v, width=95, font=ctk.CTkFont("Segoe UI", 11)).pack(side="left", padx=(0, 8))
@@ -1033,6 +1053,8 @@ class DaoRongStudioV7(ctk.CTk):
         ctk.CTkSwitch(sw, text="Thao tác tự nhiên giống người thật (di chuột cong + lệch điểm & nhịp bấm ngẫu nhiên)", variable=self.var_human_like).pack(anchor="w", pady=3)
         ctk.CTkSwitch(sw, text="Phát tiếng chuông & hiện thông báo nổi trên màn hình khi đầy túi / nổ rồng mục tiêu", variable=self.var_sound_alert).pack(anchor="w", pady=3)
         ctk.CTkSwitch(sw, text="Tự động kiểm tra bản cập nhật mới", variable=self.var_auto_update).pack(anchor="w", pady=3)
+        ctk.CTkSwitch(sw, text="Nghỉ giải lao tự nhiên (tự nghỉ 1–2 phút mỗi 45 phút treo máy như người thật)", variable=self.var_human_break).pack(anchor="w", pady=3)
+        ctk.CTkSwitch(sw, text="Tự chụp lưu ảnh khi nổ Rồng Cực hiếm / Event / Chúc phúc (giới hạn 30 ảnh mới nhất)", variable=self.var_save_rare).pack(anchor="w", pady=3)
         ctk.CTkSwitch(sw, text="Hiện nhật ký kỹ thuật chi tiết (tọa độ, điểm khớp — chỉ bật khi cần kiểm tra lỗi)", variable=self.var_verbose_log).pack(anchor="w", pady=3)
 
         c_stop = ctk.CTkFrame(sc_basic, corner_radius=12, fg_color=C["console"], border_width=1, border_color=C["border"])
@@ -1103,6 +1125,7 @@ class DaoRongStudioV7(ctk.CTk):
         ctk.CTkSwitch(adv_sw, text="Phân biệt rồng theo màu sắc", variable=self.var_color_check).pack(anchor="w", pady=2)
         ctk.CTkSwitch(adv_sw, text="Tự động co giãn ảnh mẫu theo kích thước giả lập", variable=self.var_auto_scale).pack(anchor="w", pady=2)
         ctk.CTkSwitch(adv_sw, text="Bật nhận diện bằng tên (OCR 63 rồng + bộ nhớ AI tự học)", variable=self.var_enable_ocr).pack(anchor="w", pady=2)
+        ctk.CTkSwitch(adv_sw, text="Thu thập mẫu ảnh tự động để train AI YOLOv8-nano (trần 300 ảnh vào thư mục ai_dataset/)", variable=self.var_collect_ai).pack(anchor="w", pady=2)
 
         ai_mem_row = ctk.CTkFrame(adv_box, fg_color="transparent")
         ai_mem_row.pack(fill="x", padx=14, pady=(4, 10))
@@ -1113,6 +1136,7 @@ class DaoRongStudioV7(ctk.CTk):
         self.lbl_ai_cache_info.pack(side="left")
         ctk.CTkButton(ai_mem_row, text="🧹 Dọn bộ nhớ AI", width=130, height=28, fg_color="#7f1d1d", hover_color="#991b1b", command=self._clear_ai_cache).pack(side="right", padx=(6, 0))
         ctk.CTkButton(ai_mem_row, text="🖥️ Lưu kích thước giả lập", width=165, height=28, fg_color="#0284c7", command=self._record_reference_size).pack(side="right")
+        ctk.CTkButton(ai_mem_row, text="📸 Ảnh Rồng Quý", width=120, height=28, fg_color="#065f46", command=self._open_rare_shots_folder).pack(side="right", padx=(0, 6))
 
         cal_box = ctk.CTkFrame(sc_adv, corner_radius=12, fg_color=C["console"], border_width=1, border_color=C["border"])
         cal_box.pack(fill="x", pady=(0, 8))
@@ -1188,6 +1212,17 @@ class DaoRongStudioV7(ctk.CTk):
     # ------------------------------------------------------------------
     # Các hàm AI v10.0: Cài luật tiếng Việt, Kiểm tra nhanh, Thống kê cặp, Chạy từng acc ADB
     # ------------------------------------------------------------------
+    def _open_rare_shots_folder(self) -> None:
+        d = BASE_DIR / "lich_su_rong_quy"
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(d))
+            else:
+                messagebox.showinfo("Thư mục ảnh Rồng Quý", f"Đường dẫn: {d}")
+        except Exception as exc:
+            messagebox.showerror("Không mở được thư mục", str(exc))
+
     def _browse_adb_exe(self) -> None:
         fp = filedialog.askopenfilename(
             title="Chọn file adb.exe (hoặc HD-Adb.exe)",
@@ -1275,7 +1310,7 @@ class DaoRongStudioV7(ctk.CTk):
                 if r not in rules[cat]:
                     rules[cat].append(r)
         if parsed.get("want_dust_all"):
-            self.config_data["dust_rarities"] = ["Nguyên Liệu", "Hiếm", "Cực hiếm", "Event"]
+            self.config_data["dust_rarities"] = ["Phổ biến", "Nguyên Liệu", "Hiếm", "Cực hiếm", "Event"]
             if hasattr(self, "var_dust_rars"):
                 for k, v in self.var_dust_rars.items():
                     v.set(True)
@@ -1671,7 +1706,7 @@ class DaoRongStudioV7(ctk.CTk):
         self.combo_p1.configure(values=opts)
         self.combo_p2.configure(values=opts)
         if self.var_p1.get() not in parent_files:
-            self.var_p1.set(parent_files[0] if parent_files else "")
+            self.var_p1.set(parent_files[0] if parent_files else "(Chưa có mẫu)")
         if self.var_p2.get() not in parent_files:
             self.var_p2.set(parent_files[1] if len(parent_files) >= 2 else (parent_files[0] if parent_files else ""))
 
@@ -1701,6 +1736,9 @@ class DaoRongStudioV7(ctk.CTk):
             self.config_data["human_like_input"] = bool(self.var_human_like.get())
             self.config_data["sound_alert"] = bool(self.var_sound_alert.get())
             self.config_data["verbose_log"] = bool(self.var_verbose_log.get())
+            self.config_data["human_break_enabled"] = bool(self.var_human_break.get())
+            self.config_data["save_rare_snapshots"] = bool(self.var_save_rare.get())
+            self.config_data["collect_ai_dataset"] = bool(self.var_collect_ai.get())
             self.config_data["auto_stop"] = {
                 "enabled": bool(self.var_as_enabled.get()),
                 "max_minutes": max(0, int(self.var_as_mins.get() or 0)),

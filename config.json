@@ -124,5 +124,10 @@
   "verbose_log": false,
   "dust_rarities": [
     "Nguyên Liệu"
-  ]
+  ],
+  "human_break_enabled": true,
+  "human_break_interval_min": 45,
+  "human_break_duration_sec": 90,
+  "save_rare_snapshots": true,
+  "collect_ai_dataset": false
 }

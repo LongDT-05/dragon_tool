@@ -24,7 +24,15 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from actions import InputController
 from ocr_engine import DragonTextMatcher, load_dragon_catalog, normalize_vn
-from smart_ai import AnchorAutoCalibrator, PairStatsTracker, PersistentNameCache
+import random
+from smart_ai import (
+    AnchorAutoCalibrator,
+    OcrAdaptiveDictionary,
+    PairStatsTracker,
+    PersistentNameCache,
+    RareMomentSaver,
+    TrainingDatasetCollector,
+)
 from vision import MatchResult, VisionEngine, compute_frame_diff, compute_frame_similarity
 
 
@@ -144,6 +152,10 @@ class DaoRongBot:
         self._cached_result_frame = None
         self._learned_name_cache: List[Tuple[Any, str, str]] = []
         self._consecutive_failures = 0
+        self.ocr_dict = OcrAdaptiveDictionary(self.base_dir / "ocr_learned_map.json")
+        self.rare_saver = RareMomentSaver(self.base_dir / "lich_su_rong_quy")
+        self.dataset_collector = TrainingDatasetCollector(self.base_dir / "ai_dataset")
+        self._next_break_ts = 0.0
         self._wd_last_frame = None
         self._wd_last_change_ts = 0.0
 
@@ -534,6 +546,8 @@ class DaoRongBot:
                 return
             rx = self._find_any_close_x(screen, rect)
             if rx.found:
+                if self.config.get('collect_ai_dataset', False):
+                    self.dataset_collector.save_sample(screen, 'stray_popup')
                 diag = self._diagnose_stray_popup(screen, rect)
                 if diag == "out_of_gold":
                     return
@@ -875,11 +889,17 @@ class DaoRongBot:
                 name_crop, _, _ = self.vision.crop_roi(screen, rect, name_roi)
             ocr_raw = self.text_matcher.read_name_crop(name_crop)
             if ocr_raw:
-                tm = self.text_matcher.match_text_against_rules(ocr_raw, text_rules)
+                adapted = self.ocr_dict.lookup(ocr_raw)
+                effective_ocr = f"{adapted} ({ocr_raw.split('(', 1)[1]}" if (adapted and "(" in ocr_raw) else (adapted or ocr_raw)
+                tm = self.text_matcher.match_text_against_rules(effective_ocr, text_rules)
                 self._last_identified = (tm.identified_name, tm.identified_rarity, tm.stars)
                 self.log_tech(f"[ĐỌC TÊN] '{ocr_raw}' -> {tm.identified_name} [{tm.identified_rarity}, {tm.stars}★] | Luật: '{tm.rule_text}' ({tm.score:.2f})")
+                if tm.identified_name and tm.score >= 0.86:
+                    self.ocr_dict.learn(ocr_raw, tm.identified_name)
                 if tm.identified_name and tm.score >= 0.88 and name_crop is not None and name_crop.size > 0:
                     self.name_cache.learn(name_crop, res_key, tm.identified_name, tm.identified_rarity, tm.stars)
+                if self.config.get("collect_ai_dataset", False) and tm.score < 0.85:
+                    self.dataset_collector.save_sample(screen, "low_ocr")
                 if tm.found:
                     action = tm.category
                     act_vn = {"bless": "Chúc phúc & Cất", "keep": "Cất túi", "sell": "Bán ngay"}[action]
@@ -987,6 +1007,8 @@ class DaoRongBot:
             })
             if len(self.stats.recent_drops) > 30:
                 self.stats.recent_drops.pop()
+            if self.config.get("save_rare_snapshots", True) and (id_rarity in ("Cực hiếm", "Event") or action == "bless"):
+                self.rare_saver.save_shot(screen, id_name or "Rong_Quy", id_stars)
 
         self.on_stats(self.stats)
         self._check_auto_stop_conditions(id_name, id_rarity, id_stars)
@@ -1205,6 +1227,7 @@ class DaoRongBot:
         return None
 
     DUST_RARITY_TEMPLATES = {
+        "Phổ biến": "dust_badge_pho_bien.png",
         "Nguyên Liệu": "dragon_nguyen_lieu.png",
         "Hiếm": "dust_badge_hiem.png",
         "Cực hiếm": "dust_badge_cuc_hiem.png",
@@ -1415,6 +1438,25 @@ class DaoRongBot:
         self.log(f"=== HOÀN THÀNH VÒNG LẶP #{self.stats.cycles} - QUAY LẠI LAI RỒNG ===")
         return BotState.OPEN_BREED
 
+    def _check_human_break(self) -> None:
+        """Nghỉ giải lao tự nhiên (Human Break): nghỉ ngẫu nhiên 1-2 phút sau mỗi 40-60 phút treo máy."""
+        if not self.config.get("human_break_enabled", True):
+            return
+        interval_min = max(10, int(self.config.get("human_break_interval_min", 45) or 45))
+        dur_sec = max(15, int(self.config.get("human_break_duration_sec", 90) or 90))
+        now = time.monotonic()
+        if self._next_break_ts <= 0:
+            self._next_break_ts = now + interval_min * 60.0 * random.uniform(0.88, 1.15)
+            return
+        if now >= self._next_break_ts:
+            rest = int(dur_sec * random.uniform(0.78, 1.25))
+            self.log(f"☕ [Nghỉ tự nhiên] Đang nghỉ giải lao {rest} giây giống người chơi thật (nhấn ESC để dừng ngay)...")
+            self.stats.current_state = f"Nghỉ tự nhiên ({rest}s)"
+            self.on_stats(self.stats)
+            self.input.sleep_interruptible(float(rest), self.should_stop)
+            self._wd_last_change_ts = time.monotonic()
+            self._next_break_ts = time.monotonic() + interval_min * 60.0 * random.uniform(0.88, 1.15)
+
     def _check_watchdog(self) -> None:
         wd_sec = float(self.config.get("watchdog_seconds", 180) or 0)
         if wd_sec <= 0:
@@ -1441,7 +1483,7 @@ class DaoRongBot:
     def _run_loop(self) -> None:
         mode_lbl = "Chỉ Auto Lai" if self.is_breed_only else "Lai + Hóa Bụi"
         ctrl_lbl = f"Chạy Ngầm ADB ({self.adb_serial})" if self.input.is_adb_mode else "Chuột Tự Nhiên"
-        self.log(f"=== BẮT ĐẦU DaoRong_tool v10.1 [{self.account_label}] | {mode_lbl} | {ctrl_lbl} ===")
+        self.log(f"=== BẮT ĐẦU DaoRong_tool v10.2 [{self.account_label}] | {mode_lbl} | {ctrl_lbl} ===")
         state = BotState.OPEN_BREED
         idle = self._timing("loop_idle_delay", 0.10)
 
@@ -1473,10 +1515,11 @@ class DaoRongBot:
 
                 state = handlers[state]()
                 self._check_watchdog()
+                self._check_human_break()
                 self.input.sleep_interruptible(idle, self.should_stop)
         except Exception as exc:
             self.log(f"[LỖI NGOẠI LỆ] {exc}")
         finally:
             self.stats.current_state = "Đã dừng"
             self.on_stats(self.stats)
-            self.log(f"=== ĐÃ DỪNG DaoRong_tool v10.1 [{self.account_label}] ===")
+            self.log(f"=== ĐÃ DỪNG DaoRong_tool v10.2 [{self.account_label}] ===")
