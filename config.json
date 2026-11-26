@@ -1,0 +1,128 @@
+{
+  "window_title_keyword": "AUTO",
+  "reference_window_size": [
+    1330,
+    761
+  ],
+  "auto_scale_templates": true,
+  "selected_parent_1": "",
+  "selected_parent_2": "",
+  "unknown_dragon_action": "keep",
+  "speed_preset": "fast",
+  "island_hops": 2,
+  "max_log_lines": 500,
+  "enable_text_ocr": true,
+  "dragon_text_rules": {
+    "bless": [],
+    "keep": [],
+    "sell": []
+  },
+  "confidence": {
+    "button": 0.76,
+    "nav_button": 0.72,
+    "dragon": 0.75,
+    "dragon_name": 0.85,
+    "bag_full": 0.78,
+    "nguyen_lieu": 0.7
+  },
+  "use_color_check": true,
+  "timings": {
+    "click_delay": 0.24,
+    "after_island_switch_delay": 0.8,
+    "breed_wait_timeout": 45.0,
+    "star_settle_delay": 0.15,
+    "bless_wait_timeout": 20.0,
+    "ui_wait_timeout": 8.0,
+    "scroll_settle_delay": 0.5,
+    "loop_idle_delay": 0.1
+  },
+  "pins": {
+    "egg_rel": [
+      0.482,
+      0.23
+    ],
+    "altar_rel": [
+      0.482,
+      0.23
+    ]
+  },
+  "drag_settings": {
+    "result_roi": [
+      0.28,
+      0.22,
+      0.78,
+      0.55
+    ],
+    "result_name_roi": [
+      0.57,
+      0.292,
+      0.77,
+      0.342
+    ],
+    "bottom_bar_roi": [
+      0.15,
+      0.62,
+      0.58,
+      0.88
+    ],
+    "bottom_drag_start": [
+      0.48,
+      0.75
+    ],
+    "bottom_drag_end": [
+      0.22,
+      0.75
+    ],
+    "max_parent_scrolls": 10,
+    "dust_list_roi": [
+      0.62,
+      0.18,
+      0.92,
+      0.86
+    ],
+    "dust_drag_start": [
+      0.77,
+      0.74
+    ],
+    "dust_drag_end": [
+      0.77,
+      0.28
+    ],
+    "dust_click_offset_rel": [
+      0.038,
+      0.04
+    ],
+    "max_dust_scrolls": 14,
+    "drag_duration": 0.38,
+    "drag_hold_end": 0.12
+  },
+  "update_manifest_url": "",
+  "auto_check_update": true,
+  "ui_reference_window_size": [
+    1330,
+    761
+  ],
+  "dragon_reference_window_size": [
+    0,
+    0
+  ],
+  "bot_mode": "breed_and_dust",
+  "control_mode": "windows",
+  "adb_path": "",
+  "human_like_input": true,
+  "dust_max_star": 0,
+  "auto_stop": {
+    "enabled": false,
+    "max_minutes": 0,
+    "max_breeds": 0,
+    "stop_on_rare_count": 0,
+    "stop_on_epic_or_event": false
+  },
+  "watchdog_seconds": 180,
+  "sound_alert": true,
+  "active_profile": "Mặc định",
+  "verbose_log": false,
+  "dust_rarities": [
+    "Nguyên Liệu"
+  ]
+}
