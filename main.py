@@ -1216,6 +1216,7 @@ class DaoRongStudioV10(ctk.CTk):
             adb=self.adb_ctrl if ctrl == "adb" else None, adb_serial=serial,
             shared_text_matcher=self.shared_text_matcher, shared_name_cache=self.shared_name_cache,
             shared_calibrator=self.shared_calibrator, shared_pair_stats=self.shared_pair_stats,
+                shared_yolo=self.shared_yolo,
         )
         checks = tmp.run_preflight_check()
         body = "\n".join(f"{'✅' if ok else '❌'} {t}: {d}" for ok, t, d in checks)
@@ -1240,7 +1241,8 @@ class DaoRongStudioV10(ctk.CTk):
     def _clear_ai_cache(self) -> None:
         n = self.shared_name_cache.clear()
         self.shared_calibrator.clear()
-        self.lbl_ai_cache_info.configure(text=f"Bộ nhớ AI: 0/{PersistentNameCache.MAX_ENTRIES} mẫu (<1MB)")
+        ai_lbl = "● AI Thị Giác Thông Minh: Đang hoạt động" if self.shared_yolo.ready else "● AI Thị Giác: Chế độ chuẩn"
+        self.lbl_ai_cache_info.configure(text=f"{ai_lbl}  •  Đã nhớ 0 rồng")
         self.append_log(f"Đã dọn sạch {n} mẫu trong bộ nhớ AI tự học.")
 
     def _refresh_pair_stats_ui(self) -> None:
@@ -1470,6 +1472,7 @@ class DaoRongStudioV10(ctk.CTk):
             alert_callback=self._on_bot_alert, adb=self.adb_ctrl, adb_serial=serial, account_label=lbl,
             shared_text_matcher=self.shared_text_matcher, shared_name_cache=self.shared_name_cache,
             shared_calibrator=self.shared_calibrator, shared_pair_stats=self.shared_pair_stats,
+                shared_yolo=self.shared_yolo,
         )
         self.multi_bots[serial] = bot
         bot.start(restart_from_egg=False)
@@ -1503,6 +1506,7 @@ class DaoRongStudioV10(ctk.CTk):
                     alert_callback=self._on_bot_alert, adb=self.adb_ctrl, adb_serial=serial, account_label=lbl,
                     shared_text_matcher=self.shared_text_matcher, shared_name_cache=self.shared_name_cache,
                     shared_calibrator=self.shared_calibrator, shared_pair_stats=self.shared_pair_stats,
+                shared_yolo=self.shared_yolo,
                 )
                 self.multi_bots[serial] = bot
                 bot.start(restart_from_egg=restart_from_egg)
@@ -1515,6 +1519,7 @@ class DaoRongStudioV10(ctk.CTk):
             alert_callback=self._on_bot_alert, account_label="Chuột chính",
             shared_text_matcher=self.shared_text_matcher, shared_name_cache=self.shared_name_cache,
             shared_calibrator=self.shared_calibrator, shared_pair_stats=self.shared_pair_stats,
+                shared_yolo=self.shared_yolo,
         )
         self.lbl_badge.configure(text=" ● Đang chạy ", fg_color="#14532D", text_color="#4ADE80")
         self.btn_play_pause.configure(text="⏸  TẠM DỪNG (Ctrl+Enter)", fg_color=C["amber"], text_color="#451A03")
@@ -1723,7 +1728,7 @@ class DaoRongStudioV10(ctk.CTk):
             messagebox.showinfo("Thư mục AI Cấp 2", str(folder), parent=self)
 
     def _test_remote_notify(self) -> None:
-        self._save_settings_from_ui(silent=True)
+        self._save_all_settings(silent=True)
         ntf = AlertNotifier(
             telegram_token=self.var_tg_token.get().strip(),
             telegram_chat_id=self.var_tg_chat.get().strip(),

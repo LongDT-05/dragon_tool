@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
-CURRENT_VERSION = "13.2"
+CURRENT_VERSION = "13.4"
 
 DEFAULT_MANIFEST_URL = "https://github.com/LongDT-05/dragon_tool/releases/latest/download/version.json"
 
@@ -165,6 +165,7 @@ def download_and_prepare_update(
         f'if exist "{src_str}\\app_icon.png" copy /Y "{src_str}\\app_icon.png" "{app_dir_str}\\app_icon.png" >nul',
         f'if exist "{src_str}\\dragons_db.json" copy /Y "{src_str}\\dragons_db.json" "{app_dir_str}\\dragons_db.json" >nul',
         f'if exist "{src_str}\\templates\\ui" xcopy /E /I /Y "{src_str}\\templates\\ui" "{app_dir_str}\\templates\\ui" >nul',
+        f'if exist "{src_str}\\models" xcopy /E /I /Y "{src_str}\\models" "{app_dir_str}\\models" >nul',
         f'start "" "{app_dir_str}\\DaoRong_tool.exe"',
         f'rmdir /s /q "{tmp_root}"',
         "exit",

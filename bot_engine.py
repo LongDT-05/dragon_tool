@@ -98,6 +98,7 @@ class DaoRongBot:
         shared_name_cache: Optional[PersistentNameCache] = None,
         shared_calibrator: Optional[AnchorAutoCalibrator] = None,
         shared_pair_stats: Optional[PairStatsTracker] = None,
+        shared_yolo: Optional[YoloLevel2Vision] = None,
     ):
         self.base_dir = Path(base_dir)
         self.templates_dir = self.base_dir / "templates"
@@ -167,7 +168,7 @@ class DaoRongBot:
         self._wd_last_frame = None
         self._wd_last_change_ts = 0.0
         self.dir_memory = PairDirectionMemory()
-        self.yolo = YoloLevel2Vision(self.base_dir / "models")
+        self.yolo = shared_yolo if shared_yolo is not None else YoloLevel2Vision(self.base_dir / "models")
         self.notifier = AlertNotifier(
             telegram_token=config.get("telegram_token", ""),
             telegram_chat_id=config.get("telegram_chat_id", ""),
@@ -836,7 +837,9 @@ class DaoRongBot:
 
     def _click_upper_slot(self, rect: WindowRect, slot_idx: int) -> None:
         """Click đúng tâm ô bố mẹ phía trên (1=Trái, 2=Phải) để trả rồng chọn nhầm xuống thanh dưới."""
-        rx, ry = (0.245, 0.385) if slot_idx == 1 else (0.485, 0.385)
+        # Ở chế độ cửa sổ Windows có thanh tiêu đề LDPlayer (~34px) -> bù nhẹ ry xuống +0.035
+        ry = 0.385 if self.vision.is_adb_mode else 0.420
+        rx = 0.245 if slot_idx == 1 else 0.485
         cx, cy = rect.rel_to_abs(rx, ry)
         self.input.click(cx, cy, post_delay=0.22 * self._spd, stop_check=self.should_stop)
 
@@ -1079,7 +1082,7 @@ class DaoRongBot:
                     )
                     if m_btn.found:
                         found_btns[bname] = (m_btn.x, m_btn.y)
-                        self.calibrator.record(self._mode_key, bname, m_btn.x, m_btn.y, rect)
+                        self.calibrator.record(self._mode_key, bname, *rect.abs_to_rel(m_btn.x, m_btn.y))
 
             if len(found_btns) >= 2 or "btn_keep.png" in found_btns:
                 self._cached_result_btns = found_btns
