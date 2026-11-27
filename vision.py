@@ -422,8 +422,6 @@ class VisionEngine:
                     if m.score > best.score:
                         best = m
                         best_scale_used = cur_sc
-                    if best.found and best.score >= 0.95:
-                        break
                 if best.found and best_scale_used is not None:
                     self._confirmed_scales[ckey] = best_scale_used
         return best

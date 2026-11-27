@@ -617,8 +617,10 @@ class DaoRongBot:
                 path, timeout=wait_sec, threshold=thr, stop_check=self.should_stop
             )
             if res.found:
+                if self.should_stop():
+                    return None
                 self.input.click(res.x, res.y, post_delay=post_delay, stop_check=self.should_stop)
-                return res
+                return None if self.should_stop() else res
             if attempt < retries:
                 self.log(
                     f"[THỬ LẠI] Chưa thấy '{filename}' (max={res.score:.2f} / {thr:.2f}), thử lần {attempt + 1}..."
@@ -871,9 +873,9 @@ class DaoRongBot:
         inner = slot_bgr[int(h * 0.20):int(h * 0.82), int(w * 0.20):int(w * 0.80)]
         if inner.size == 0:
             return None
-        # Từ chối ảnh đơn sắc (kể cả khung đỏ tối đồng nhất không có hình rồng!) bằng độ lệch chuẩn ảnh xám
-        gray = cv2.cvtColor(inner, cv2.COLOR_BGR2GRAY)
-        if float(gray.std()) < 10.0:
+        # Từ chối ảnh đơn sắc (đỏ tối đồng nhất, đen) bằng độ lệch chuẩn từng kênh màu -> vẫn nhận ảnh nhiều màu đồng độ sáng!
+        max_ch_std = max(float(inner[:, :, c].std()) for c in range(3)) if inner.ndim == 3 else float(inner.std())
+        if max_ch_std < 10.0:
             return None
         hsv = cv2.cvtColor(inner, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, (0, 0, 85), (180, 255, 255))
@@ -946,15 +948,15 @@ class DaoRongBot:
             ]
         start_rel = _clamp_pt(raw_s)
         end_rel = _clamp_pt(raw_e)
-        # Đảm bảo 2 đầu vuốt KHÔNG BAO GIỜ trùng nhau kể cả khi vùng quét hẹp
+        # Kiểm tra độ rộng vùng vuốt (chỉ chặn thao tác vuốt sau khi đã quét các thẻ đang hiện sẵn!)
+        can_swipe = True
         if abs(start_rel[0] - end_rel[0]) < 0.05:
             if (rx2 - rx1) >= 0.06:
                 pad = min(0.02, (rx2 - rx1) * 0.15)
                 start_rel[0] = rx2 - pad
                 end_rel[0] = rx1 + pad
             else:
-                self.log("⚠️ [THANH RỒNG] Vùng quét quá hẹp để vuốt — hãy hiệu chỉnh lại bottom_bar_roi!")
-                return False
+                can_swipe = False
         full_limit = max(1, int(self._drag_cfg("max_parent_scrolls", 24)))
         drag_dur = 0.42 * self._spd
         hold_end = 0.12
@@ -1107,6 +1109,9 @@ class DaoRongBot:
         if picked_count >= 2 and not need:
             if _confirm_final_slots(prev_scr, prev_rect):
                 return True
+            return False
+        if not can_swipe:
+            self.log("⚠️ [THANH RỒNG] Vùng quét quá hẹp để vuốt — hãy hiệu chỉnh lại bottom_bar_roi!")
             return False
 
         pref_dir = self.dir_memory.preferred_direction(p1_path.name, p2_path.name)
@@ -1362,10 +1367,13 @@ class DaoRongBot:
                 sw_cut = max(12, int(nc_now.shape[1] * 0.60))
                 if float(cv2.matchTemplate(nc_pre[:, sw_cut:], nc_now[:, sw_cut:], cv2.TM_CCOEFF_NORMED)[0, 0]) < 0.96:
                     star_ok = False
-            if star_ok and c_stars is not None and self.text_matcher.is_available:
-                _, st_now = _get_ocr_once(nc_now)
-                if st_now is None or st_now != c_stars:
+            if star_ok and c_stars is not None:
+                if not self.text_matcher.is_available:
                     star_ok = False
+                else:
+                    _, st_now = _get_ocr_once(nc_now)
+                    if st_now is None or st_now != c_stars:
+                        star_ok = False
             if (
                 star_ok
                 and PersistentNameCache._has_text_signal(nc_now)
@@ -1388,12 +1396,15 @@ class DaoRongBot:
             if mem_hit is not None:
                 c_name, c_rar, c_stars, c_sc = mem_hit
                 star_verified = True
-                if c_stars is not None and self.text_matcher.is_available:
-                    _, st_chk = _get_ocr_once(name_crop)
-                    # Nếu OCR không đọc được sao HOẶC đọc ra sao khác -> KHÔNG dùng mẫu nhớ (chống Bán sai sao!)
-                    if st_chk is None or st_chk != c_stars:
+                if c_stars is not None:
+                    if not self.text_matcher.is_available:
                         star_verified = False
-                        self.log_tech(f"[AI CACHE] Từ chối mẫu nhớ {c_stars}★ (OCR hiện tại: {st_chk}★)!")
+                        self.log_tech(f"[AI CACHE] Từ chối mẫu nhớ {c_stars}★ vì OCR không khả dụng để xác minh sao!")
+                    else:
+                        _, st_chk = _get_ocr_once(name_crop)
+                        if st_chk is None or st_chk != c_stars:
+                            star_verified = False
+                            self.log_tech(f"[AI CACHE] Từ chối mẫu nhớ {c_stars}★ (OCR hiện tại: {st_chk}★)!")
                 if star_verified:
                     self._last_identified = (c_name, c_rar, c_stars)
                     synth_txt = f"{c_name} ({c_stars} sao)" if c_stars else c_name
@@ -2041,17 +2052,16 @@ class DaoRongBot:
                 ph, pw = post_scr.shape[:2]
                 preview_box = post_scr[int(ph * 0.25):int(ph * 0.45), int(pw * 0.27):int(pw * 0.41)]
                 preview_hist = self._dragon_hsv_hist(preview_box)
-                pv_gray = cv2.cvtColor(preview_box, cv2.COLOR_BGR2GRAY) if (preview_box.size > 0 and preview_box.ndim == 3) else preview_box
-                if preview_box.size == 0 or float(pv_gray.std()) < 12.0 or preview_hist is None:
-                    self.log("🛡️ [XÁC MINH SAU CLICK] Ô Xem Trước Hóa Bụi trống/đơn sắc không có hình rồng -> Không bấm Xác nhận!")
+                pv_max_std = max(float(preview_box[:, :, c].std()) for c in range(3)) if (preview_box.size > 0 and preview_box.ndim == 3) else (float(preview_box.std()) if preview_box.size > 0 else 0.0)
+                if preview_box.size == 0 or pv_max_std < 12.0 or preview_hist is None or pre_card_hist is None:
+                    self.log("🛡️ [XÁC MINH SAU CLICK] Ô Xem Trước hoặc thẻ dự kiến thiếu chi tiết để xác minh -> Không bấm Xác nhận!")
                     skipped_pts.append((chosen.x, chosen.y))
                     continue
-                if pre_card_hist is not None:
-                    pv_sim = float(cv2.compareHist(pre_card_hist, preview_hist, cv2.HISTCMP_CORREL))
-                    if pv_sim < 0.65:
-                        self.log(f"🛡️ [XÁC MINH SAU CLICK] Rồng vào ô Hóa Bụi khác thẻ dự kiến (khớp={pv_sim:.2f}) -> Không bấm Xác nhận!")
-                        skipped_pts.append((chosen.x, chosen.y))
-                        continue
+                pv_sim = float(cv2.compareHist(pre_card_hist, preview_hist, cv2.HISTCMP_CORREL))
+                if pv_sim < 0.65:
+                    self.log(f"🛡️ [XÁC MINH SAU CLICK] Rồng vào ô Hóa Bụi khác thẻ dự kiến (khớp={pv_sim:.2f}) -> Không bấm Xác nhận!")
+                    skipped_pts.append((chosen.x, chosen.y))
+                    continue
 
                 res_dust = self._click_ui("btn_dust.png", timeout=3.0, retries=1, post_delay=0.4 * self._spd)
                 if not (res_dust and res_dust.found):
@@ -2072,10 +2082,12 @@ class DaoRongBot:
                         break
                     continue
                 if res_dust and res_dust.found:
+                    if self.should_stop():
+                        break
                     res_cf = self._click_ui(
                         "btn_dust_confirm.png", timeout=2.6, retries=1, post_delay=0.45 * self._spd
                     )
-                    if res_cf and res_cf.found:
+                    if res_cf and res_cf.found and not self.should_stop():
                         dust_fail_count = 0
                         self.stats.dusted += 1
                         if use_ledger and chosen_star is not None:
