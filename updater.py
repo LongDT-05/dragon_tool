@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
-CURRENT_VERSION = "14.6"
+CURRENT_VERSION = "14.7"
 
 DEFAULT_MANIFEST_URL = "https://github.com/LongDT-05/dragon_tool/releases/latest/download/version.json"
 

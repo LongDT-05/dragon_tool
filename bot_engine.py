@@ -160,7 +160,9 @@ class DaoRongBot:
         self._pre_identified = None
         self._breed_counted_for_cycle = False
         self._pair_stats_recorded_for_cycle = False
+        self._drop_recorded_for_cycle = False
         self._pair_stats_recorded_for_cycle = False
+        self._drop_recorded_for_cycle = False
         self._keep_retry_count = 0
         self._session_dust_sprites: Dict[Tuple[str, int], List[np.ndarray]] = {}
         self._learned_name_cache: List[Tuple[Any, str, str]] = []
@@ -869,9 +871,17 @@ class DaoRongBot:
         inner = slot_bgr[int(h * 0.20):int(h * 0.82), int(w * 0.20):int(w * 0.80)]
         if inner.size == 0:
             return None
+        # Từ chối ảnh đơn sắc (kể cả khung đỏ tối đồng nhất không có hình rồng!) bằng độ lệch chuẩn ảnh xám
+        gray = cv2.cvtColor(inner, cv2.COLOR_BGR2GRAY)
+        if float(gray.std()) < 10.0:
+            return None
         hsv = cv2.cvtColor(inner, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, (0, 0, 85), (180, 255, 255))
+        if int(cv2.countNonZero(mask)) < 25:
+            return None
         hist = cv2.calcHist([hsv], [0, 1], mask, [18, 8], [0, 180, 0, 256])
+        if float(hist.sum()) <= 0.0:
+            return None
         cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
         return hist
 
@@ -936,10 +946,15 @@ class DaoRongBot:
             ]
         start_rel = _clamp_pt(raw_s)
         end_rel = _clamp_pt(raw_e)
-        # Đảm bảo 2 đầu vuốt không bị ép trùng nhau khi vùng quét hẹp
-        if abs(start_rel[0] - end_rel[0]) < 0.06 and (rx2 - rx1) >= 0.10:
-            start_rel[0] = rx2 - 0.03
-            end_rel[0] = rx1 + 0.03
+        # Đảm bảo 2 đầu vuốt KHÔNG BAO GIỜ trùng nhau kể cả khi vùng quét hẹp
+        if abs(start_rel[0] - end_rel[0]) < 0.05:
+            if (rx2 - rx1) >= 0.06:
+                pad = min(0.02, (rx2 - rx1) * 0.15)
+                start_rel[0] = rx2 - pad
+                end_rel[0] = rx1 + pad
+            else:
+                self.log("⚠️ [THANH RỒNG] Vùng quét quá hẹp để vuốt — hãy hiệu chỉnh lại bottom_bar_roi!")
+                return False
         full_limit = max(1, int(self._drag_cfg("max_parent_scrolls", 24)))
         drag_dur = 0.42 * self._spd
         hold_end = 0.12
@@ -1120,6 +1135,9 @@ class DaoRongBot:
                 # Không gọi adjust_rel_point lần 2 vì tọa độ đã nằm trực tiếp trên khung game!
                 x1, y1 = prev_rect.rel_to_abs(p_from[0], p_from[1])
                 x2, y2 = prev_rect.rel_to_abs(p_to[0], p_to[1])
+                if abs(x1 - x2) < 12 and abs(y1 - y2) < 12:
+                    self.log("⚠️ [THANH RỒNG] Hai đầu vuốt quá gần nhau -> Hủy vuốt, cần hiệu chỉnh vùng quét!")
+                    return False
                 rem_lbl = " & ".join(lb for lb, _ in need)
                 self.log_tech(f"[THANH RỒNG] {dir_name} ({step}/{limit}) tìm {rem_lbl}...")
                 self.input.smooth_drag(
@@ -1151,6 +1169,7 @@ class DaoRongBot:
         self._set_state(BotState.SELECT_PARENTS)
         self._breed_counted_for_cycle = False
         self._pair_stats_recorded_for_cycle = False
+        self._drop_recorded_for_cycle = False
         if self._check_bag_full():
             return BotState.EXIT_BREED_TO_DUST
 
@@ -1318,22 +1337,34 @@ class DaoRongBot:
         has_rules = any(bool(text_rules.get(k)) for k in ("bless", "keep", "sell"))
         name_crop = None
 
+        # Đọc OCR đúng 1 lần duy nhất cho khung hiện tại và dùng chung cho mọi nhánh (tránh gọi OCR 3 lần!)
+        ocr_once_done = False
+        ocr_once_raw: Optional[str] = None
+        ocr_once_stars: Optional[int] = None
+
+        def _get_ocr_once(crop_img: np.ndarray) -> Tuple[Optional[str], Optional[int]]:
+            nonlocal ocr_once_done, ocr_once_raw, ocr_once_stars
+            if not ocr_once_done:
+                ocr_once_done = True
+                if self.text_matcher.is_available and crop_img is not None and crop_img.size > 0:
+                    from ocr_engine import extract_stars as _ext_st_once
+                    ocr_once_raw = self.text_matcher.read_name_crop(crop_img)
+                    ocr_once_stars = _ext_st_once(ocr_once_raw or "")
+            return ocr_once_raw, ocr_once_stars
+
         if getattr(self, "_pre_identified", None) is not None:
             pre_act, c_name, c_rar, c_stars, c_sc, nc_pre = self._pre_identified
             self._pre_identified = None
             nc_now, _, _ = self.vision.crop_roi(screen, rect, name_roi)
-            # Chỉ dùng kết quả nhận diện sớm nếu vùng tên trên khung hiện tại KHÔNG đổi so với khung sớm!
+            name_crop = nc_now
             star_ok = True
             if nc_now.shape == nc_pre.shape and nc_now.shape[1] >= 30:
                 sw_cut = max(12, int(nc_now.shape[1] * 0.60))
-                s_sim = float(cv2.matchTemplate(nc_pre[:, sw_cut:], nc_now[:, sw_cut:], cv2.TM_CCOEFF_NORMED)[0, 0])
-                if s_sim < 0.96:
+                if float(cv2.matchTemplate(nc_pre[:, sw_cut:], nc_now[:, sw_cut:], cv2.TM_CCOEFF_NORMED)[0, 0]) < 0.96:
                     star_ok = False
-            if star_ok and self.text_matcher.is_available:
-                from ocr_engine import extract_stars as _ext_stars
-                ocr_now = self.text_matcher.read_name_crop(nc_now)
-                st_now = _ext_stars(ocr_now or "")
-                if c_stars is not None and (st_now is None or st_now != c_stars):
+            if star_ok and c_stars is not None and self.text_matcher.is_available:
+                _, st_now = _get_ocr_once(nc_now)
+                if st_now is None or st_now != c_stars:
                     star_ok = False
             if (
                 star_ok
@@ -1347,23 +1378,23 @@ class DaoRongBot:
                 st_str = f" ({c_stars}★)" if c_stars else ""
                 self.log(f"⚡ Lai ra: {c_name}{st_str} [{c_rar}] → {act_vn} (nhớ trước 0ms)")
             else:
-                self.log_tech("[NHẬN DIỆN SỚM] Vùng tên đã thay đổi trên khung nút -> Đọc lại trực tiếp!")
+                self.log_tech("[NHẬN DIỆN SỚM] Vùng tên/sao đổi hoặc chưa đọc rõ sao -> Đọc lại trực tiếp!")
 
-        # ƯU TIÊN 1 (SIÊU TỐC < 1.5ms): AI Bộ Nhớ Tự Học Vĩnh Viễn — KIỂM TRA TRƯỚC TIÊN, KHÔNG CHỜ QUÉT THƯ MỤC!
+        # ƯU TIÊN 1: AI Bộ Nhớ Tự Học — nếu mẫu nhớ có số sao, BẮT BUỘC khớp với số sao OCR vừa đọc trên khung hiện tại!
         if action is None and has_rules and self.name_cache.count > 0:
-            name_crop, _, _ = self.vision.crop_roi(screen, rect, name_roi)
+            if name_crop is None:
+                name_crop, _, _ = self.vision.crop_roi(screen, rect, name_roi)
             mem_hit = self.name_cache.match(name_crop, res_key, threshold=0.89)
             if mem_hit is not None:
                 c_name, c_rar, c_stars, c_sc = mem_hit
-                star_conflict = False
+                star_verified = True
                 if c_stars is not None and self.text_matcher.is_available:
-                    from ocr_engine import extract_stars as _ext_st2
-                    ocr_chk = self.text_matcher.read_name_crop(name_crop)
-                    st_chk = _ext_st2(ocr_chk or "")
-                    if st_chk is not None and st_chk != c_stars:
-                        star_conflict = True
-                        self.log_tech(f"[AI CACHE] Bỏ qua mẫu nhớ {c_stars}★ vì OCR đọc được {st_chk}★!")
-                if not star_conflict:
+                    _, st_chk = _get_ocr_once(name_crop)
+                    # Nếu OCR không đọc được sao HOẶC đọc ra sao khác -> KHÔNG dùng mẫu nhớ (chống Bán sai sao!)
+                    if st_chk is None or st_chk != c_stars:
+                        star_verified = False
+                        self.log_tech(f"[AI CACHE] Từ chối mẫu nhớ {c_stars}★ (OCR hiện tại: {st_chk}★)!")
+                if star_verified:
                     self._last_identified = (c_name, c_rar, c_stars)
                     synth_txt = f"{c_name} ({c_stars} sao)" if c_stars else c_name
                     tm_mem = self.text_matcher.match_text_against_rules(synth_txt, text_rules)
@@ -1388,11 +1419,11 @@ class DaoRongBot:
                     f"[QUYẾT ĐỊNH - ẢNH TÊN] '{best_name_img.name}' -> [{action.upper()}] ({best_name_img.score:.2f})."
                 )
 
-        # ƯU TIÊN 2B: Đọc dòng Tên+Sao bằng OCR -> tự học vĩnh viễn vào PersistentNameCache!
+        # ƯU TIÊN 2B: Đọc dòng Tên+Sao bằng OCR (tái sử dụng kết quả ocr_once nếu đã đọc!)
         if action is None and has_rules and self.config.get("enable_text_ocr", True):
             if name_crop is None:
                 name_crop, _, _ = self.vision.crop_roi(screen, rect, name_roi)
-            ocr_raw = self.text_matcher.read_name_crop(name_crop)
+            ocr_raw, _ = _get_ocr_once(name_crop)
             if ocr_raw:
                 adapted = self.ocr_dict.lookup(ocr_raw)
                 effective_ocr = f"{adapted} ({ocr_raw.split('(', 1)[1]}" if (adapted and "(" in ocr_raw) else (adapted or ocr_raw)
@@ -1445,7 +1476,9 @@ class DaoRongBot:
                     self.stats.kept += 1
                     keep_succeeded = True
 
-        elif action == "sell":
+        sell_succeeded = False
+        bless_succeeded = False
+        if action == "sell":
             cached_s = self._cached_result_btns.get("btn_sell.png")
             clicked_s = False
             if cached_s is not None:
@@ -1458,6 +1491,7 @@ class DaoRongBot:
                 res_cf = self._click_ui("btn_sell_confirm.png", timeout=4.5, retries=2, post_delay=0.12 * self._spd)
                 if res_cf and res_cf.found:
                     self.stats.sold += 1
+                    sell_succeeded = True
 
         elif action == "bless":
             # Kiểm tra nhanh Đá Chúc Phúc (Cần: need/have) -> nếu không đủ đá thì Cất ngay để không mất rồng quý!
@@ -1505,6 +1539,7 @@ class DaoRongBot:
                 if res_k2 and res_k2.found:
                     self.log("[CHÚC PHÚC] Chúc phúc (+1 sao) & Đã cất rồng thành công!")
                 self.stats.blessed += 1
+                bless_succeeded = True
             else:
                 self.log("[LỖI] Không thấy nút Chúc phúc (btn_bless.png)! Hãy chụp lại ở mục Cài Đặt Vùng & Nút.")
 
@@ -1526,7 +1561,7 @@ class DaoRongBot:
                 except Exception:
                     pass
                 self.log_tech(f"[SỔ HÓA BỤI] +1 ({id_rarity}, {id_stars}★) -> tổng chờ bụi: {sum(self._session_dust_ledger.values())}")
-        action_ok = keep_succeeded or (action in ("sell", "bless"))
+        action_ok = keep_succeeded or sell_succeeded or bless_succeeded
         if action_ok and not getattr(self, "_pair_stats_recorded_for_cycle", False):
             self._pair_stats_recorded_for_cycle = True
             try:
@@ -1538,7 +1573,8 @@ class DaoRongBot:
                 )
             except Exception:
                 pass
-        if id_rarity in ("Hiếm", "Cực hiếm", "Event") or action == "bless":
+        if (id_rarity in ("Hiếm", "Cực hiếm", "Event") or action == "bless") and not getattr(self, "_drop_recorded_for_cycle", False):
+            self._drop_recorded_for_cycle = True
             if id_rarity == "Hiếm":
                 self.stats.rare_hits += 1
             elif id_rarity == "Cực hiếm":
@@ -1587,6 +1623,7 @@ class DaoRongBot:
 
         self._breed_counted_for_cycle = False
         self._pair_stats_recorded_for_cycle = False
+        self._drop_recorded_for_cycle = False
         if self._check_bag_full():
             return BotState.EXIT_BREED_TO_DUST
         return BotState.SELECT_PARENTS
@@ -1975,9 +2012,14 @@ class DaoRongBot:
                 bottom_hit_count = 0
                 is_left_col = chosen.x < (rect.left + rect.width * 0.77)
                 col_side = "Cột TRÁI" if is_left_col else "Cột PHẢI"
-                # Tâm ngang chuẩn theo đúng cột (cột trái ~70.5%, cột phải ~83.5%), không cộng lệch +48px ra ngoài thẻ!
-                click_x = int(rect.left + rect.width * (0.705 if is_left_col else 0.835))
-                click_y = chosen.y + int(rect.height * 0.045)
+                # Tính điểm bấm trực tiếp từ khung thẻ vừa phát hiện (tôn trọng dust_click_offset_rel & kẹp trong ROI!)
+                off_rel = self._drag_cfg("dust_click_offset_rel", [0.025, 0.038])
+                is_badge_crop = (chosen.w < rect.width * 0.09) or (chosen.h < rect.height * 0.09)
+                dx = int(min(chosen.w * 0.45, rect.width * float(off_rel[0]))) if is_badge_crop else 0
+                dy = int(min(chosen.h * 0.65, rect.height * float(off_rel[1]))) if is_badge_crop else 0
+                roi_px = rect.roi_rel_to_local_px(roi)
+                click_x = max(rect.left + roi_px[0] + 6, min(rect.left + roi_px[2] - 6, chosen.x + dx))
+                click_y = max(rect.top + roi_px[1] + 6, min(rect.top + roi_px[3] - 6, chosen.y + dy))
 
                 # Xác minh lại ngay trước khi bấm Hóa Bụi: kiểm tra khóa / cấm bụi trên khung hình tươi!
                 if self._is_card_locked(screen, rect, chosen.x, chosen.y, chosen.w, chosen.h) or self._is_card_protected(screen, rect, chosen.x, chosen.y, chosen.w, chosen.h):
@@ -1999,11 +2041,12 @@ class DaoRongBot:
                 ph, pw = post_scr.shape[:2]
                 preview_box = post_scr[int(ph * 0.25):int(ph * 0.45), int(pw * 0.27):int(pw * 0.41)]
                 preview_hist = self._dragon_hsv_hist(preview_box)
-                if preview_box.size == 0 or float(preview_box.std()) < 18.0:
-                    self.log("🛡️ [XÁC MINH SAU CLICK] Ô Xem Trước Hóa Bụi đang trống/tối -> Không bấm Xác nhận!")
+                pv_gray = cv2.cvtColor(preview_box, cv2.COLOR_BGR2GRAY) if (preview_box.size > 0 and preview_box.ndim == 3) else preview_box
+                if preview_box.size == 0 or float(pv_gray.std()) < 12.0 or preview_hist is None:
+                    self.log("🛡️ [XÁC MINH SAU CLICK] Ô Xem Trước Hóa Bụi trống/đơn sắc không có hình rồng -> Không bấm Xác nhận!")
                     skipped_pts.append((chosen.x, chosen.y))
                     continue
-                if pre_card_hist is not None and preview_hist is not None:
+                if pre_card_hist is not None:
                     pv_sim = float(cv2.compareHist(pre_card_hist, preview_hist, cv2.HISTCMP_CORREL))
                     if pv_sim < 0.65:
                         self.log(f"🛡️ [XÁC MINH SAU CLICK] Rồng vào ô Hóa Bụi khác thẻ dự kiến (khớp={pv_sim:.2f}) -> Không bấm Xác nhận!")
