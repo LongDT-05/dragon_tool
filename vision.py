@@ -387,7 +387,7 @@ class VisionEngine:
         # Multi-scale fallback khi Fullscreen (do mất thanh tiêu đề/toolbar làm lệch nhẹ tỷ lệ 3-6%)
         is_ui_tmpl = Path(template_path).parent.name.lower() == "ui"
         eff_ref = self.reference_size if is_ui_tmpl else self.dragon_reference_size
-        if not best.found and self.auto_scale:
+        if self.auto_scale and (not best.found or best.score < 0.96):
             if eff_ref[0] > 200 and eff_ref[1] > 200:
                 rw, rh = float(eff_ref[0]), float(eff_ref[1])
                 if self.is_adb_mode and rw > 600 and rh > 400:
@@ -407,6 +407,9 @@ class VisionEngine:
                 ckey = (str(Path(template_path).resolve()), rect.width, rect.height)
                 # Tỷ lệ đã lưu chỉ dùng để ƯU TIÊN THỨ TỰ thử trước; chỉ dừng sớm nếu khớp >= 0.95!
                 scale_list = [s_avg * mult for mult in mults]
+                # Luôn giữ kích thước ảnh gốc (1.0) làm phương án dự phòng!
+                if all(abs(sc - 1.0) > 0.02 for sc in scale_list):
+                    scale_list.append(1.0)
                 cached_m = self._confirmed_scales.get(ckey)
                 if cached_m is not None:
                     scale_list = [cached_m] + [sc for sc in scale_list if abs(sc - cached_m) > 0.01]

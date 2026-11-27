@@ -1058,12 +1058,22 @@ class DaoRongBot:
                 self.log(f"⚡ [CHỌN RỒNG] Thấy {label} ({pp.stem}, {res.score:.2f}) -> Click ngay.")
                 self.input.click(res.x, res.y, post_delay=0.22 * self._spd, stop_check=self.should_stop)
 
-                chk_scr, chk_rct = self.vision.capture_window()
-                l_after, r_after = self._count_empty_parent_slots(chk_scr, chk_rct)
-                patch_after = _card_patch(chk_scr, chk_rct, res.x, res.y)
+                # Chụp lại có giới hạn (tối đa 3 nhịp) để đợi ảnh ADB cập nhật kịp ô bố mẹ sau cú chạm!
+                entered_slot = 0
+                chk_scr, chk_rct = cur_scr, cur_rct
+                l_after, r_after = l_before, r_before
+                patch_after = patch_before
+                for _poll in range(3):
+                    if self.should_stop():
+                        break
+                    chk_scr, chk_rct = self.vision.capture_window()
+                    l_after, r_after = self._count_empty_parent_slots(chk_scr, chk_rct)
+                    patch_after = _card_patch(chk_scr, chk_rct, res.x, res.y)
+                    entered_slot = 1 if (l_before and not l_after) else (2 if (r_before and not r_after) else 0)
+                    if entered_slot in (1, 2):
+                        break
+                    self.input.sleep_interruptible(0.16 * self._spd, self.should_stop)
                 cur_scr, cur_rct = chk_scr, chk_rct
-
-                entered_slot = 1 if (l_before and not l_after) else (2 if (r_before and not r_after) else 0)
                 patch_changed = compute_frame_diff(patch_before, patch_after) > 5.0
 
                 if entered_slot in (1, 2):
@@ -2047,19 +2057,35 @@ class DaoRongBot:
                 self.log(f"[HÓA BỤI] {col_side} ({chosen.score:.2f}) -> Click giữa rồng ({click_x}, {click_y}).")
                 self.input.click(click_x, click_y, post_delay=0.45 * self._spd, stop_check=self.should_stop)
 
-                # Chụp khung hình MỚI và kiểm tra đúng khung XEM TRƯỚC BÊN TRÁI (nơi rồng vừa chọn nhảy vào!)
-                post_scr, post_rect = self.vision.capture_window()
-                ph, pw = post_scr.shape[:2]
-                preview_box = post_scr[int(ph * 0.25):int(ph * 0.45), int(pw * 0.27):int(pw * 0.41)]
-                preview_hist = self._dragon_hsv_hist(preview_box)
-                pv_max_std = max(float(preview_box[:, :, c].std()) for c in range(3)) if (preview_box.size > 0 and preview_box.ndim == 3) else (float(preview_box.std()) if preview_box.size > 0 else 0.0)
-                if preview_box.size == 0 or pv_max_std < 12.0 or preview_hist is None or pre_card_hist is None:
-                    self.log("🛡️ [XÁC MINH SAU CLICK] Ô Xem Trước hoặc thẻ dự kiến thiếu chi tiết để xác minh -> Không bấm Xác nhận!")
+                # Chờ tối đa 4 khung hình để ô Xem Trước bên trái tải xong ảnh rồng vừa chọn!
+                if pre_card_hist is None:
+                    self.log("🛡️ [XÁC MINH SAU CLICK] Thẻ dự kiến không trích được mẫu màu -> Bỏ qua an toàn!")
                     skipped_pts.append((chosen.x, chosen.y))
                     continue
-                pv_sim = float(cv2.compareHist(pre_card_hist, preview_hist, cv2.HISTCMP_CORREL))
-                if pv_sim < 0.65:
-                    self.log(f"🛡️ [XÁC MINH SAU CLICK] Rồng vào ô Hóa Bụi khác thẻ dự kiến (khớp={pv_sim:.2f}) -> Không bấm Xác nhận!")
+
+                pv_matched = False
+                pv_reason = "ô Xem Trước chưa tải/trống"
+                for _pv_try in range(4):
+                    if self.should_stop():
+                        break
+                    post_scr, post_rect = self.vision.capture_window()
+                    ph, pw = post_scr.shape[:2]
+                    preview_box = post_scr[int(ph * 0.25):int(ph * 0.45), int(pw * 0.27):int(pw * 0.41)]
+                    preview_hist = self._dragon_hsv_hist(preview_box)
+                    pv_max_std = max(float(preview_box[:, :, c].std()) for c in range(3)) if (preview_box.size > 0 and preview_box.ndim == 3) else (float(preview_box.std()) if preview_box.size > 0 else 0.0)
+                    if preview_box.size > 0 and pv_max_std >= 12.0 and preview_hist is not None:
+                        pv_sim = float(cv2.compareHist(pre_card_hist, preview_hist, cv2.HISTCMP_CORREL))
+                        if pv_sim >= 0.65:
+                            pv_matched = True
+                            break
+                        pv_reason = f"khác thẻ dự kiến (khớp={pv_sim:.2f})"
+                    else:
+                        pv_reason = "ô Xem Trước trống/chưa tải xong"
+                    if _pv_try < 3:
+                        self.input.sleep_interruptible(0.18 * self._spd, self.should_stop)
+
+                if not pv_matched:
+                    self.log(f"🛡️ [XÁC MINH SAU CLICK] Bỏ qua thẻ vì {pv_reason} -> Không bấm Hóa Bụi!")
                     skipped_pts.append((chosen.x, chosen.y))
                     continue
 
