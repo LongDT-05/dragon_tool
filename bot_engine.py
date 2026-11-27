@@ -973,17 +973,18 @@ class DaoRongBot:
         if picked_count >= 2 or not need:
             return True
 
-        half = max(3, max_scrolls // 2)
+        # Kéo hết trọn thanh rồng (tự dừng ngay khi đụng mép qua stuck_count >= 2), KHÔNG bao giờ quay đầu giữa chừng!
+        full_limit = max(28, max_scrolls * 2)
         pref_dir = self.dir_memory.preferred_direction(p1_path.name, p2_path.name)
         if pref_dir == "left":
             directions = [
-                ("left", "kéo sang trái (hướng nhớ)", end_rel, start_rel, half),
-                ("right", "kéo ngược sang phải", start_rel, end_rel, max_scrolls),
+                ("left", "kéo sang trái (hướng nhớ)", end_rel, start_rel, full_limit),
+                ("right", "kéo ngược sang phải", start_rel, end_rel, full_limit),
             ]
         else:
             directions = [
-                ("right", "kéo sang phải", start_rel, end_rel, half),
-                ("left", "kéo ngược sang trái", end_rel, start_rel, max_scrolls),
+                ("right", "kéo sang phải", start_rel, end_rel, full_limit),
+                ("left", "kéo ngược sang trái", end_rel, start_rel, full_limit),
             ]
 
         for dir_code, dir_name, p_from, p_to, limit in directions:
