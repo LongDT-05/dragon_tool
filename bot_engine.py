@@ -869,23 +869,21 @@ class DaoRongBot:
 
     def _select_parents_dual_fast(self, p1_path: Path, p2_path: Path) -> bool:
         """
-        Chọn 2 rồng bố mẹ thông minh, KHÔNG BAO GIỜ gỡ nhầm rồng đúng:
-        1. Kiểm tra 2 ô trên trước: nếu đã có sẵn đủ 2 rồng -> bấm Lai Rồng ngay!
-        2. Khi bấm chọn 1 rồng trên thanh dưới (ngưỡng >= 0.86), kiểm tra lại ngay trên thanh dưới:
-           - Rồng vừa bấm ĐÃ BIẾN MẤT khỏi thanh dưới -> chắc chắn 100% đã vào đúng ô trên!
-           - Rồng vừa bấm VẪN CÒN ở thanh dưới nhưng 1 ô trên vừa có rồng -> đã bấm lệch sang con kế bên
-             -> tự bấm đúng ô trên vừa nhảy vào để gỡ con nhầm xuống rồi chọn lại!
+        Chọn 2 rồng bố mẹ CHUẨN XÁC (Winner-Takes-All + Patch-Gone + HSV Color Guard):
+        1. Chấm điểm TẤT CẢ rồng đang cần trên cùng khung hình: con nào khớp cao hơn được quyền nhận thẻ đó
+           (tuyệt đối không để Rồng 1 cướp nhầm thẻ của Rồng 2 khi cả hai cùng họ Hai Đầu!).
+        2. Dùng ngưỡng 0.83 (rồng đúng luôn đạt 0.88-1.00; rồng khác họ chỉ ~0.75-0.80).
+        3. Kiểm chứng tại ĐÚNG ô vừa bấm (không quét cả thanh dưới gây gỡ nhầm rồng đúng).
+        4. Kéo quãng chuẩn ~2.2 thẻ/nhịp (0.48 -> 0.24 trong 0.42s) để đi hết thanh rồng dài mà không bỏ sót.
         """
         roi = self._drag_cfg("bottom_bar_roi", [0.15, 0.62, 0.61, 0.89])
-        # Kéo bước ngắn đúng ~1.2 thẻ/nhịp (0.42 -> 0.31) để MỌI rồng đều hiện ít nhất 3 nhịp liên tiếp, không bao giờ lướt qua!
-        start_rel = [0.42, 0.75]
-        end_rel = [0.31, 0.75]
-        max_scrolls = int(self._drag_cfg("max_parent_scrolls", 16))
-        drag_dur = 0.54 * self._spd
+        start_rel = [0.48, 0.75]
+        end_rel = [0.24, 0.75]
+        full_limit = max(35, int(self._drag_cfg("max_parent_scrolls", 16)) * 2)
+        drag_dur = 0.42 * self._spd
         hold_end = 0.12
-        settle = 0.28 * self._spd
-        # Ngưỡng 0.78 bắt dính rồng kể cả lúc rồng đang nhún/thở animation (đã có lá chắn màu HSV + kiểm chứng biến mất bảo vệ!)
-        thr = min(0.78, max(0.74, self._conf("dragon", 0.75)))
+        settle = 0.30 * self._spd
+        thr = max(0.83, self._conf("dragon", 0.75))
 
         scr0, rect0 = self.vision.capture_window()
         l_emp0, r_emp0 = self._count_empty_parent_slots(scr0, rect0)
@@ -896,76 +894,77 @@ class DaoRongBot:
 
         need: List[Tuple[str, Path]] = [("Rồng 1", p1_path), ("Rồng 2", p2_path)]
         best_seen: Dict[str, float] = {"Rồng 1": 0.0, "Rồng 2": 0.0}
-        picked_count = 2 - slots_needed  # Nếu đã có sẵn 1 con trên ô -> chỉ cần tìm đúng 1 con còn lại!
+        picked_count = 2 - slots_needed
+
+        def _card_patch(scr: np.ndarray, rct: WindowRect, cx: int, cy: int) -> np.ndarray:
+            lx, ly = cx - rct.left, cy - rct.top
+            pw, ph = max(24, int(rct.width * 0.04)), max(24, int(rct.height * 0.06))
+            y1, y2 = max(0, ly - ph), min(scr.shape[0], ly + ph)
+            x1, x2 = max(0, lx - pw), min(scr.shape[1], lx + pw)
+            return scr[y1:y2, x1:x2].copy()
 
         def _try_pick_visible(scr: np.ndarray, rct: WindowRect) -> Tuple[np.ndarray, WindowRect]:
             nonlocal need, picked_count
             cur_scr, cur_rct = scr, rct
-            for label, pp in list(need):
-                if picked_count >= 2:
+            # Lặp tối đa 2 lần nếu cả 2 rồng bố mẹ đang nằm ngay cạnh nhau trên cùng 1 màn hình!
+            for _ in range(2):
+                if picked_count >= 2 or not need:
                     need.clear()
                     break
-                res = self.vision.find_template(pp, threshold=thr, roi_rel=roi, screen_bgr=cur_scr, rect=cur_rct)
-                if res.score > best_seen[label]:
-                    best_seen[label] = res.score
-                if not res.found:
-                    continue
-                # Không click thẻ rồng bị cắt nửa ở sát mép trái/phải thanh rồng (dễ bấm nhầm con bên cạnh!)
-                rel_x = (res.x - cur_rct.left) / max(1, cur_rct.width)
-                if rel_x < 0.175 or rel_x > 0.545:
-                    continue
 
-                # Ghi nhớ trạng thái 2 ô trên TRƯỚC khi click
+                # Chấm điểm TẤT CẢ rồng đang cần trên cùng khung hình hiện tại (Winner-Takes-All!)
+                candidates = []
+                for label, pp in need:
+                    res = self.vision.find_template(pp, threshold=thr, roi_rel=roi, screen_bgr=cur_scr, rect=cur_rct)
+                    if res.score > best_seen[label]:
+                        best_seen[label] = res.score
+                    if res.found:
+                        rel_x = (res.x - cur_rct.left) / max(1, cur_rct.width)
+                        if 0.180 <= rel_x <= 0.535:
+                            candidates.append((res.score, label, pp, res))
+
+                if not candidates:
+                    break
+
+                # Chọn ứng viên có điểm khớp CAO NHẤT (tránh Rồng 1 cướp thẻ của Rồng 2!)
+                candidates.sort(key=lambda c: c[0], reverse=True)
+                _, label, pp, res = candidates[0]
+
                 l_before, r_before = self._count_empty_parent_slots(cur_scr, cur_rct)
+                patch_before = _card_patch(cur_scr, cur_rct, res.x, res.y)
                 self.log(f"⚡ [CHỌN RỒNG] Thấy {label} ({pp.stem}, {res.score:.2f}) -> Click ngay.")
                 self.input.click(res.x, res.y, post_delay=0.22 * self._spd, stop_check=self.should_stop)
 
-                # Kiểm chứng: rồng vừa bấm đã rời khỏi thanh dưới chưa (ngưỡng lỏng 0.72 để bắt cả trường hợp rồng bị lệch ra mép)?
                 chk_scr, chk_rct = self.vision.capture_window()
-                still_there = self.vision.find_template(pp, threshold=0.72, roi_rel=roi, screen_bgr=chk_scr, rect=chk_rct)
                 l_after, r_after = self._count_empty_parent_slots(chk_scr, chk_rct)
+                patch_after = _card_patch(chk_scr, chk_rct, res.x, res.y)
                 cur_scr, cur_rct = chk_scr, chk_rct
 
                 entered_slot = 1 if (l_before and not l_after) else (2 if (r_before and not r_after) else 0)
-                if not still_there.found:
-                    # Kiểm tra bảng màu HSV của ô vừa vào (nếu đã từng học mẫu ô trên của con rồng này!)
+                patch_changed = compute_frame_diff(patch_before, patch_after) > 5.0
+
+                if entered_slot in (1, 2):
                     wrong_by_color = False
-                    if entered_slot in (1, 2):
-                        s_crop = self._slot_crop_upper(cur_scr, entered_slot, self.vision.is_adb_mode)
-                        h_cur = self._dragon_hsv_hist(s_crop)
-                        if h_cur is not None:
-                            known_h = self._parent_slot_hists.get(pp.name)
-                            if known_h is not None:
-                                sim = float(cv2.compareHist(h_cur, known_h, cv2.HISTCMP_CORREL))
-                                if sim < 0.74:
-                                    wrong_by_color = True
-                                    self.log(f"⚠️ [KIỂM CHỨNG MÀU] Ô {entered_slot} khác màu rồng bố mẹ (khớp={sim:.2f}) -> Tự gỡ ra chọn lại!")
-                                    self._click_upper_slot(cur_rct, entered_slot)
-                                    cur_scr, cur_rct = self.vision.capture_window()
-                                    l_after, r_after = self._count_empty_parent_slots(cur_scr, cur_rct)
-                            elif res.score >= 0.80:
-                                # Tự học bảng màu ô trên của rồng bố mẹ trong phiên này!
-                                self._parent_slot_hists[pp.name] = h_cur
+                    s_crop = self._slot_crop_upper(cur_scr, entered_slot, self.vision.is_adb_mode)
+                    h_cur = self._dragon_hsv_hist(s_crop)
+                    if h_cur is not None:
+                        known_h = self._parent_slot_hists.get(pp.name)
+                        if known_h is not None:
+                            sim = float(cv2.compareHist(h_cur, known_h, cv2.HISTCMP_CORREL))
+                            if sim < 0.74:
+                                wrong_by_color = True
+                                self.log(f"⚠️ [KIỂM CHỨNG MÀU] Ô {entered_slot} khác màu {label} (khớp={sim:.2f}) -> Tự gỡ ra chọn lại!")
+                                self._click_upper_slot(cur_rct, entered_slot)
+                                cur_scr, cur_rct = self.vision.capture_window()
+                                l_after, r_after = self._count_empty_parent_slots(cur_scr, cur_rct)
+                        elif res.score >= 0.86 and patch_changed:
+                            self._parent_slot_hists[pp.name] = h_cur
+
                     if not wrong_by_color:
                         need = [(lb, p) for lb, p in need if lb != label]
                         picked_count = 2 - (int(l_after) + int(r_after))
-                elif (l_before and not l_after) or (r_before and not r_after):
-                    # Rồng mục tiêu VẪN CÒN dưới thanh nhưng 1 ô trên vừa đầy -> click lệch sang con kế bên!
-                    wrong_slot = 1 if (l_before and not l_after) else 2
-                    self.log(f"⚠️ [KIỂM CHỨNG] Click lệch sang con bên cạnh vào Ô {wrong_slot} -> Tự bấm gỡ ra chọn lại!")
-                    self._click_upper_slot(cur_rct, wrong_slot)
-                    cur_scr, cur_rct = self.vision.capture_window()
-                    # Thử bấm lại đúng tọa độ mới của rồng mục tiêu ngay lập tức
-                    re_m = self.vision.find_template(pp, threshold=thr, roi_rel=roi, screen_bgr=cur_scr, rect=cur_rct)
-                    if re_m.found:
-                        self.input.click(re_m.x, re_m.y, post_delay=0.22 * self._spd, stop_check=self.should_stop)
-                        cur_scr, cur_rct = self.vision.capture_window()
-                        l_a2, r_a2 = self._count_empty_parent_slots(cur_scr, cur_rct)
-                        if not self.vision.find_template(pp, threshold=thr, roi_rel=roi, screen_bgr=cur_scr, rect=cur_rct).found:
-                            need = [(lb, p) for lb, p in need if lb != label]
-                            picked_count = 2 - (int(l_a2) + int(r_a2))
-                if picked_count >= 2:
-                    need.clear()
+                elif not patch_changed:
+                    # Click không ăn -> thử lại 1 nhịp
                     break
             return cur_scr, cur_rct
 
@@ -973,8 +972,6 @@ class DaoRongBot:
         if picked_count >= 2 or not need:
             return True
 
-        # Kéo hết trọn thanh rồng (tự dừng ngay khi đụng mép qua stuck_count >= 2), KHÔNG bao giờ quay đầu giữa chừng!
-        full_limit = max(28, max_scrolls * 2)
         pref_dir = self.dir_memory.preferred_direction(p1_path.name, p2_path.name)
         if pref_dir == "left":
             directions = [
@@ -1014,9 +1011,9 @@ class DaoRongBot:
                     self.dir_memory.record(p1_path.name, p2_path.name, dir_code)
                     return True
 
-                if compute_frame_diff(before_roi, after_roi) < 2.2:
+                if compute_frame_diff(before_roi, after_roi) < 1.2:
                     stuck_count += 1
-                    if stuck_count >= 2:
+                    if stuck_count >= 3:
                         break
                 else:
                     stuck_count = 0
