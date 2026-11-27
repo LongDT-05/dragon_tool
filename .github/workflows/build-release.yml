@@ -50,14 +50,14 @@ jobs:
             python -m PyInstaller --noconfirm --onedir --windowed --name DaoRong_tool --icon=app_icon.ico --distpath ..\dist --workpath ..\build --add-data "pyarmor_runtime_000000;pyarmor_runtime_000000" --collect-all customtkinter --collect-all rapidocr_onnxruntime --exclude-module matplotlib --exclude-module scipy --exclude-module pandas --exclude-module pytest --exclude-module IPython --exclude-module PyQt5 --exclude-module PySide6 main.py
             Pop-Location
           } else {
-            python -m PyInstaller --noconfirm --onedir --windowed --uac-admin --name DaoRong_tool --icon=app_icon.ico --collect-all customtkinter --collect-all rapidocr_onnxruntime --exclude-module matplotlib --exclude-module scipy --exclude-module pandas --exclude-module pytest --exclude-module IPython --exclude-module PyQt5 --exclude-module PySide6 main.py
+            python -m PyInstaller --noconfirm --onedir --windowed --name DaoRong_tool --icon=app_icon.ico --collect-all customtkinter --collect-all rapidocr_onnxruntime --exclude-module matplotlib --exclude-module scipy --exclude-module pandas --exclude-module pytest --exclude-module IPython --exclude-module PyQt5 --exclude-module PySide6 main.py
           }
           Copy-Item config.json dist\DaoRong_tool\config.json -Force
           Copy-Item dragons_db.json dist\DaoRong_tool\dragons_db.json -Force
           Copy-Item app_icon.ico dist\DaoRong_tool\app_icon.ico -Force
           Copy-Item app_icon.png dist\DaoRong_tool\app_icon.png -Force
           Copy-Item -Recurse -Force templates dist\DaoRong_tool\templates
-          
+          if (Test-Path "models") { Copy-Item -Path "models" -Destination "dist\DaoRong_tool\models" -Recurse -Force }
 
       - name: Package Release ZIP & version.json
         shell: pwsh
