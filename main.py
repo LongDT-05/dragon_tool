@@ -151,6 +151,11 @@ def load_config() -> Dict[str, Any]:
         timing = cfg.setdefault("timing", {})
         timing["scroll_settle_delay"] = 0.38
         cfg["config_schema_version"] = 12
+    # v12.1: Khôi phục ui_reference_window_size về chuẩn [1330, 761] của bộ nút UI tích hợp sẵn
+    # (tránh lỗi bấm 'Lưu cỡ giả lập' khi cửa sổ nhỏ làm phóng đại sai toàn bộ 22 nút UI!)
+    if int(cfg.get("config_schema_version", 0) or 0) < 13:
+        cfg["ui_reference_window_size"] = [1330, 761]
+        cfg["config_schema_version"] = 13
         try:
             save_config(cfg)
         except Exception:
@@ -731,7 +736,7 @@ class DaoRongStudioV10(ctk.CTk):
         tabs = ctk.CTkTabview(page, corner_radius=12, fg_color=C["card"], segmented_button_fg_color=C["console"])
         tabs.pack(fill="both", expand=True)
         tab_basic = tabs.add("Cơ Bản")
-        tab_adv = tabs.add("Nâng Cao & Nút Game")
+        tab_adv = tabs.add("Treo 24/7 & Thông Báo")
         tab_stats = tabs.add("Thống Kê Cặp Lai")
         tab_guide = tabs.add("Hướng Dẫn")
 
@@ -798,7 +803,6 @@ class DaoRongStudioV10(ctk.CTk):
             ("Tự chụp lưu ảnh khi nổ Cực hiếm / Event / Chúc phúc (giới hạn 30 ảnh)", self.var_save_rare),
             ("Phát tiếng chuông & hiện thông báo nổi khi đầy túi / nổ rồng mục tiêu", self.var_sound_alert),
             ("Tự động kiểm tra bản cập nhật mới", self.var_auto_update),
-            ("Hiện nhật ký kỹ thuật chi tiết (chỉ bật khi cần soi lỗi)", self.var_verbose_log),
         ]:
             ctk.CTkSwitch(sw_wrap, text=text_sw, variable=var_sw, font=ctk.CTkFont("Segoe UI", 11)).pack(anchor="w", pady=3)
 
@@ -840,51 +844,37 @@ class DaoRongStudioV10(ctk.CTk):
         ctk.CTkButton(pf_r, text="Lưu Profile mới", width=115, height=28, fg_color=C["purple"], command=self._save_new_profile).pack(side="left", padx=(0, 6))
         ctk.CTkButton(pf_r, text="Xóa", width=55, height=28, fg_color="#3B0D16", hover_color=C["red"], text_color="#FDA4AF", command=self._delete_selected_profile).pack(side="left")
 
-        # --- TAB 2: NÂNG CAO & NÚT GAME ---
+        # --- TAB 2: TREO 24/7 & THÔNG BÁO (Gọn sạch, chỉ giữ tính năng cho người dùng) ---
         sc_a = ctk.CTkScrollableFrame(tab_adv, fg_color="transparent")
         sc_a.pack(fill="both", expand=True)
 
         adv = ctk.CTkFrame(sc_a, corner_radius=10, fg_color=C["console"], border_width=1, border_color=C["border"])
         adv.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(adv, text="GIẢ LẬP & TREO MÁY 24/7", font=ctk.CTkFont("Segoe UI", 11, "bold"), text_color=C["accent"]).pack(anchor="w", padx=12, pady=(8, 2))
         ag = ctk.CTkFrame(adv, fg_color="transparent")
-        ag.pack(fill="x", padx=12, pady=8)
+        ag.pack(fill="x", padx=12, pady=6)
         ctk.CTkLabel(ag, text="Giả lập:", font=ctk.CTkFont("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w", pady=4, padx=(0, 8))
         ctk.CTkComboBox(ag, variable=self.var_win_title, values=["AUTO", "LDPlayer", "BlueStacks", "MuMu", "Nox", "MEmu"], width=140, fg_color=C["card"]).grid(row=0, column=1, sticky="w", pady=4, padx=(0, 14))
         ctk.CTkLabel(ag, text="Số đảo Hóa Bụi:", font=ctk.CTkFont("Segoe UI", 11, "bold")).grid(row=0, column=2, sticky="w", pady=4, padx=(0, 8))
         ctk.CTkEntry(ag, textvariable=self.var_hops, width=65, fg_color=C["card"]).grid(row=0, column=3, sticky="w", pady=4)
 
-        ctk.CTkLabel(ag, text="Độ nhạy ảnh:", font=ctk.CTkFont("Segoe UI", 11, "bold")).grid(row=1, column=0, sticky="w", pady=4, padx=(0, 8))
-        ctk.CTkSegmentedButton(ag, values=["Thoáng", "Chuẩn", "Chặt"], variable=self.var_accuracy, width=165).grid(row=1, column=1, sticky="w", pady=4, padx=(0, 14))
-        ctk.CTkLabel(ag, text="Watchdog (giây):", font=ctk.CTkFont("Segoe UI", 11, "bold")).grid(row=1, column=2, sticky="w", pady=4, padx=(0, 8))
-        ctk.CTkEntry(ag, textvariable=self.var_watchdog_sec, width=65, fg_color=C["card"]).grid(row=1, column=3, sticky="w", pady=4)
-
-        ctk.CTkLabel(ag, text="File adb.exe:", font=ctk.CTkFont("Segoe UI", 11, "bold")).grid(row=2, column=0, sticky="w", pady=4, padx=(0, 8))
+        ctk.CTkLabel(ag, text="File adb.exe:", font=ctk.CTkFont("Segoe UI", 11, "bold")).grid(row=1, column=0, sticky="w", pady=4, padx=(0, 8))
         ar = ctk.CTkFrame(ag, fg_color="transparent")
-        ar.grid(row=2, column=1, columnspan=3, sticky="w", pady=4)
+        ar.grid(row=1, column=1, columnspan=3, sticky="w", pady=4)
         ctk.CTkEntry(ar, textvariable=self.var_adb_path, width=250, fg_color=C["card"], placeholder_text="Để trống = tự tìm").pack(side="left", padx=(0, 6))
         ctk.CTkButton(ar, text="Chọn file", width=78, height=28, fg_color=C["card2"], command=self._browse_adb_exe).pack(side="left")
 
         asw = ctk.CTkFrame(adv, fg_color="transparent")
-        asw.pack(fill="x", padx=12, pady=(0, 8))
-        ctk.CTkSwitch(asw, text="Phân biệt rồng theo màu sắc", variable=self.var_color_check, font=ctk.CTkFont("Segoe UI", 11)).pack(anchor="w", pady=2)
-        ctk.CTkSwitch(asw, text="Tự động co giãn ảnh mẫu theo kích thước giả lập", variable=self.var_auto_scale, font=ctk.CTkFont("Segoe UI", 11)).pack(anchor="w", pady=2)
-        ctk.CTkSwitch(asw, text="Bật nhận diện tên (OCR 63 rồng + AI tự học)", variable=self.var_enable_ocr, font=ctk.CTkFont("Segoe UI", 11)).pack(anchor="w", pady=2)
-        ctk.CTkSwitch(asw, text="Thu thập mẫu ảnh tự động để train AI Cấp 2 YOLOv8-nano (trần 300 ảnh vào ai_dataset/)", variable=self.var_collect_ai, font=ctk.CTkFont("Segoe UI", 11)).pack(anchor="w", pady=2)
+        asw.pack(fill="x", padx=12, pady=(2, 6))
         ctk.CTkSwitch(asw, text="Watchdog 24/7: Tự mở lại game qua ADB nếu bị văng ra màn hình chính", variable=self.var_watchdog_relaunch, font=ctk.CTkFont("Segoe UI", 11)).pack(anchor="w", pady=2)
 
         amr = ctk.CTkFrame(adv, fg_color="transparent")
-        amr.pack(fill="x", padx=12, pady=(2, 4))
-        self.lbl_ai_cache_info = ctk.CTkLabel(amr, text=f"AI Cấp 1: {self.shared_name_cache.count}/{PersistentNameCache.MAX_ENTRIES} mẫu (<1MB)", font=ctk.CTkFont("Segoe UI", 11, "bold"), text_color=C["accent"])
+        amr.pack(fill="x", padx=12, pady=(4, 10))
+        ai_lbl = "● AI Thị Giác Thông Minh: Đang hoạt động" if self.shared_yolo.ready else "● AI Thị Giác: Chế độ chuẩn"
+        self.lbl_ai_cache_info = ctk.CTkLabel(amr, text=f"{ai_lbl}  •  Đã nhớ {self.shared_name_cache.count} rồng", font=ctk.CTkFont("Segoe UI", 11, "bold"), text_color=C["green"] if self.shared_yolo.ready else C["accent"])
         self.lbl_ai_cache_info.pack(side="left")
-        ctk.CTkButton(amr, text="Dọn bộ nhớ AI", width=104, height=26, fg_color="#3B0D16", hover_color=C["red"], text_color="#FDA4AF", command=self._clear_ai_cache).pack(side="right", padx=(6, 0))
-        ctk.CTkButton(amr, text="Ảnh Rồng Quý", width=100, height=26, fg_color="#064E3B", command=self._open_rare_shots_folder).pack(side="right", padx=(6, 0))
-        ctk.CTkButton(amr, text="Lưu cỡ giả lập", width=100, height=26, fg_color=C["primary"], command=self._record_reference_size).pack(side="right")
-
-        yrow = ctk.CTkFrame(adv, fg_color="transparent")
-        yrow.pack(fill="x", padx=12, pady=(0, 10))
-        y_col = C["green"] if self.shared_yolo.ready else C["sub"]
-        ctk.CTkLabel(yrow, text=f"AI Cấp 2 (YOLOv8-nano): {self.shared_yolo.status_text}", font=ctk.CTkFont("Segoe UI", 11, "bold"), text_color=y_col).pack(side="left")
-        ctk.CTkButton(yrow, text="Mở thư mục models/", width=130, height=24, fg_color=C["card2"], command=self._open_models_folder).pack(side="right")
+        ctk.CTkButton(amr, text="Dọn bộ nhớ tên", width=108, height=26, fg_color="#3B0D16", hover_color=C["red"], text_color="#FDA4AF", command=self._clear_ai_cache).pack(side="right", padx=(6, 0))
+        ctk.CTkButton(amr, text="Ảnh Rồng Quý", width=104, height=26, fg_color="#064E3B", command=self._open_rare_shots_folder).pack(side="right")
 
         # Thẻ Thông Báo Điện Thoại (Telegram / Discord)
         ntf = ctk.CTkFrame(sc_a, corner_radius=10, fg_color=C["console"], border_width=1, border_color=C["border"])
@@ -902,40 +892,6 @@ class DaoRongStudioV10(ctk.CTk):
         ctk.CTkEntry(ng, textvariable=self.var_tg_chat, width=120, fg_color=C["card"], placeholder_text="VD: 987654321").grid(row=0, column=3, sticky="w", pady=3)
         ctk.CTkLabel(ng, text="Discord Webhook:", font=ctk.CTkFont("Segoe UI", 11, "bold")).grid(row=1, column=0, sticky="w", pady=3, padx=(0, 8))
         ctk.CTkEntry(ng, textvariable=self.var_dc_webhook, width=440, fg_color=C["card"], placeholder_text="https://discord.com/api/webhooks/...").grid(row=1, column=1, columnspan=3, sticky="w", pady=3)
-
-        cal = ctk.CTkFrame(sc_a, corner_radius=10, fg_color=C["console"], border_width=1, border_color=C["border"])
-        cal.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(cal, text="CĂN CHỈNH VÙNG & GHIM ĐIỂM (Chỉ dùng nếu máy bạn lệch nút)", font=ctk.CTkFont("Segoe UI", 11, "bold"), text_color=C["amber"]).pack(anchor="w", padx=12, pady=(8, 4))
-        cg = ctk.CTkFrame(cal, fg_color="transparent")
-        cg.pack(fill="x", padx=10, pady=(0, 8))
-        for idx, (lbl, cmd) in enumerate([
-            ("Ghim tâm Trứng", self._pin_egg_point),
-            ("Ghim tâm Tháp", self._pin_altar_point),
-            ("Khung Thanh Rồng", self._calibrate_bottom_bar),
-            ("Khung Ảnh Rồng", self._calibrate_result_zone),
-            ("Khung Dòng Tên", self._calibrate_name_bar),
-            ("Khung Túi Hóa Bụi", self._calibrate_dust_list),
-        ]):
-            r_i, c_i = divmod(idx, 3)
-            ctk.CTkButton(cg, text=lbl, height=30, corner_radius=7, fg_color=C["card2"], hover_color=C["primary"], font=ctk.CTkFont("Segoe UI", 11, "bold"), command=cmd).grid(row=r_i, column=c_i, sticky="ew", padx=3, pady=3)
-            cg.columnconfigure(c_i, weight=1)
-
-        ui_b = ctk.CTkFrame(sc_a, corner_radius=10, fg_color=C["console"], border_width=1, border_color=C["border"])
-        ui_b.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(ui_b, text="19 ẢNH NÚT MẪU (Đã setup sẵn — chỉ chụp lại nếu bị lệch)", font=ctk.CTkFont("Segoe UI", 11, "bold"), text_color=C["accent"]).pack(anchor="w", padx=12, pady=(8, 4))
-        ug = ctk.CTkFrame(ui_b, fg_color="transparent")
-        ug.pack(fill="x", padx=8, pady=(0, 8))
-        ug.columnconfigure(0, weight=1)
-        ug.columnconfigure(1, weight=1)
-        for idx, (fname, desc, req) in enumerate(REQUIRED_UI_TEMPLATES):
-            r_i, c_i = divmod(idx, 2)
-            row = ctk.CTkFrame(ug, corner_radius=6, fg_color=C["card"])
-            row.grid(row=r_i, column=c_i, sticky="ew", padx=3, pady=2)
-            st = ctk.CTkLabel(row, text="...", width=22, font=ctk.CTkFont("Segoe UI", 11, "bold"))
-            st.pack(side="left", padx=(6, 4), pady=3)
-            self._ui_status_lbls[fname] = st
-            ctk.CTkLabel(row, text=f"{'[*] ' if req else ''}{desc}", text_color=C["text"], font=ctk.CTkFont("Segoe UI", 11)).pack(side="left", fill="x", expand=True)
-            ctk.CTkButton(row, text="Chụp", width=52, height=22, corner_radius=5, fg_color=C["card2"], command=lambda f=fname, d=desc: self._capture_ui_template(f, d)).pack(side="right", padx=5, pady=3)
 
         # --- TAB 3: THỐNG KÊ CẶP LAI ---
         sh = ctk.CTkFrame(tab_stats, fg_color="transparent")
@@ -1172,7 +1128,7 @@ class DaoRongStudioV10(ctk.CTk):
     def _record_reference_size(self) -> None:
         rect = VisionEngine(self.config_data.get("window_title_keyword", "AUTO")).get_target_window()
         if rect.found_window:
-            self.config_data["ui_reference_window_size"] = [rect.width, rect.height]
+            # Chỉ lưu cỡ chuẩn cho ảnh RỒNG người dùng tự chụp; GIỮ NGUYÊN [1330, 761] cho bộ nút UI tích hợp sẵn!
             self.config_data["dragon_reference_window_size"] = [rect.width, rect.height]
             save_config(self.config_data)
             self.append_log(f"Đã lưu kích thước giả lập chuẩn: {rect.width}×{rect.height}.")
@@ -1422,9 +1378,9 @@ class DaoRongStudioV10(ctk.CTk):
             self.config_data["dust_only_session_bred"] = bool(self.var_dust_only_session.get())
             self.config_data["watchdog_seconds"] = max(0, int(self.var_watchdog_sec.get() or 0))
             self.config_data["adb_path"] = self.var_adb_path.get().strip()
-            self.config_data["use_color_check"] = bool(self.var_color_check.get())
-            self.config_data["auto_scale_templates"] = bool(self.var_auto_scale.get())
-            self.config_data["enable_text_ocr"] = bool(self.var_enable_ocr.get())
+            self.config_data["use_color_check"] = True
+            self.config_data["auto_scale_templates"] = True
+            self.config_data["enable_text_ocr"] = True
             self.config_data["auto_check_update"] = bool(self.var_auto_update.get())
             self.config_data["human_like_input"] = bool(self.var_human_like.get())
             self.config_data["human_break_enabled"] = bool(self.var_human_break.get())

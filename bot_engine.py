@@ -705,8 +705,9 @@ class DaoRongBot:
                 scr, rect = self.vision.capture_window()
                 if self._is_breed_ui_open(scr, rect):
                     return True
+                y_egg = self.yolo.find_best(scr, "egg", conf_thr=0.52) if self.yolo.ready else None
                 m_egg = self.vision.find_template(egg_p, threshold=0.68, screen_bgr=scr, rect=rect)
-                if m_egg.found:
+                if y_egg is not None or m_egg.found:
                     self.log(f"🏝️ Đã tìm thấy Đảo Trứng sau khi chuyển đảo {label}!")
                     return True
                 m_arr = self.vision.find_template(arr_p, threshold=nav_thr, screen_bgr=scr, rect=rect)
@@ -716,7 +717,7 @@ class DaoRongBot:
                 self.input.click(m_arr.x, m_arr.y, post_delay=0.70 * self._spd, stop_check=self.should_stop)
                 # Kiểm tra ngay sau khi chuyển đảo
                 scr2, rect2 = self.vision.capture_window()
-                if self.vision.find_template(egg_p, threshold=0.68, screen_bgr=scr2, rect=rect2).found:
+                if (self.yolo.ready and self.yolo.find_best(scr2, "egg", conf_thr=0.52) is not None) or self.vision.find_template(egg_p, threshold=0.68, screen_bgr=scr2, rect=rect2).found:
                     self.log("🏝️ Đã về đúng Đảo Trứng!")
                     return True
         return False
@@ -760,7 +761,14 @@ class DaoRongBot:
                 return BotState.SELECT_PARENTS
 
             clicked_pos = None
-            if egg_path.is_file():
+            # AI Cấp 2 (YOLOv8-nano): nhìn xuyên rồng che tìm chuẩn tâm Trứng trên Đảo Trứng!
+            if self.yolo.ready:
+                y_egg = self.yolo.find_best(screen, "egg", conf_thr=0.52)
+                if y_egg is not None:
+                    clicked_pos = (rect.left + y_egg.cx, rect.top + y_egg.cy)
+                    self.config.setdefault("pins", {})["egg_rel"] = list(rect.abs_to_rel(*clicked_pos))
+                    self.log_tech(f"[AI CẤP 2] Phát hiện Trứng ({y_egg.conf:.2f}) tại {clicked_pos}.")
+            if clicked_pos is None and egg_path.is_file():
                 res = self.vision.find_template(egg_path, threshold=0.68, screen_bgr=screen, rect=rect)
                 if res.found:
                     clicked_pos = (res.x, res.y)
