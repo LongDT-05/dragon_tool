@@ -109,6 +109,8 @@ class InputController:
         delay = self._humanize_delay(self.click_delay if post_delay is None else post_delay)
 
         if self.is_adb_mode:
+            if stop_check and stop_check():
+                return
             self.adb.tap(self.adb_serial, int(x), int(y), jitter_px=self.jitter_px if self.human_like else 1)
             self.sleep_interruptible(delay, stop_check)
             return
@@ -139,6 +141,8 @@ class InputController:
         Ở chế độ ADB sẽ gửi lệnh swipe có thời lượng & độ lệch tự nhiên.
         """
         if self.is_adb_mode:
+            if stop_check and stop_check():
+                return
             dur_ms = int((duration + hold_end) * 1000)
             self.adb.swipe(
                 self.adb_serial,

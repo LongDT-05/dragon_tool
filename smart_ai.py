@@ -57,24 +57,19 @@ class NaturalRuleParser:
         # Sắp xếp tên dài trước để tránh khớp nhầm tên ngắn bên trong tên dài
         self._norm_catalog.sort(key=lambda x: len(x[2]), reverse=True)
 
-    def _extract_star_condition(self, clause_norm: str) -> Tuple[str, Optional[int]]:
-        # ">= N sao": "tu 23 sao tro len", ">= 23 sao", "tren 22 sao", "23 sao tro len"
-        m_ge = re.search(r"(?:tu\s*|>=?\s*)(\d{1,2})\s*(?:sao|\*)\s*(?:tro len)?", clause_norm)
-        if m_ge and any(k in clause_norm for k in ("tu ", "tro len", ">=", "lon hon", "tren ")):
-            val = int(m_ge.group(1))
-            if "tren " in clause_norm and "tro len" not in clause_norm and ">=" not in clause_norm:
+    def _extract_star_condition(self, clause_raw: str) -> Tuple[str, Optional[int]]:
+        cn = normalize_vn(clause_raw)
+        raw_low = (clause_raw or "").lower()
+        has_ge = (">=" in raw_low) or (">=" in cn) or any(k in cn for k in ("tu ", "tro len", "lon hon", "tren "))
+        m_num = re.search(r"(\d{1,2})\s*(?:sao|\*|★)?", raw_low if ">=" in raw_low else cn)
+        if m_num and has_ge:
+            val = int(m_num.group(1))
+            if ("tren " in cn or "lon hon" in cn) and "tro len" not in cn and ">=" not in raw_low and "tu " not in cn:
                 val += 1
             if 1 <= val <= 40:
                 return ">=", val
 
-        m_ge2 = re.search(r">=\s*(\d{1,2})", clause_norm)
-        if m_ge2:
-            val = int(m_ge2.group(1))
-            if 1 <= val <= 40:
-                return ">=", val
-
-        # "= N sao": "dung 23 sao", "= 23 sao", "(23 sao)", "23 sao"
-        m_eq = re.search(r"(?:dung\s*|=\s*|\(\s*)?(\d{1,2})\s*(?:sao|\*)", clause_norm)
+        m_eq = re.search(r"(?:dung\s*|=\s*|\(\s*)?(\d{1,2})\s*(?:sao|\*|★)", raw_low if "★" in raw_low else cn)
         if m_eq:
             val = int(m_eq.group(1))
             if 1 <= val <= 40:
@@ -108,9 +103,8 @@ class NaturalRuleParser:
         if not raw:
             return {"rules": result, "summary": [], "matched_count": 0}
 
-        # Tách câu theo dấu phẩy, chấm phẩy, xuống dòng, dấu chấm
-        clauses = [c.strip() for c in re.split(r"[,;\n.]+", raw) if c.strip()]
-        # Tách thêm theo từ "còn lại" / "nhưng" / "riêng"
+        # Bỏ dấu trước khi tách mệnh đề để bắt chuẩn 'nhưng', 'còn lại', 'riêng', 'trừ khi'!
+        clauses = [c.strip() for c in re.split(r"[,;\n.]+", normalize_vn(raw)) if c.strip()]
         expanded: List[str] = []
         for c in clauses:
             sub = re.split(r"\b(?:con lai|nhung|rieng|tru khi)\b", c, flags=re.IGNORECASE)

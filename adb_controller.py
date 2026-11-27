@@ -56,6 +56,12 @@ class AdbController:
         self._adb_path: Optional[str] = None
 
     def find_adb_executable(self) -> Optional[str]:
+        custom = (self.custom_adb_path or "").strip()
+        if custom:
+            if Path(custom).is_file():
+                self._adb_path = custom
+                return custom
+            self._adb_path = None
         if self._adb_path and Path(self._adb_path).is_file():
             return self._adb_path
 
@@ -206,7 +212,10 @@ class AdbController:
         jx = max(-jitter_px, min(jitter_px, jx))
         jy = max(-jitter_px, min(jitter_px, jy))
         tx, ty = max(1, int(x + jx)), max(1, int(y + jy))
-        self._run(["shell", "input", "tap", str(tx), str(ty)], serial=serial, timeout=3.0)
+        proc = self._run(["shell", "input", "tap", str(tx), str(ty)], serial=serial, timeout=3.0)
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", errors="ignore").strip() or proc.stdout.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(f"ADB tap thất bại (code={proc.returncode}): {err or 'device offline'}")
 
     def swipe(
         self,
@@ -222,7 +231,7 @@ class AdbController:
             return max(1, int(v + random.randint(-jitter_px, jitter_px))) if jitter_px > 0 else max(1, int(v))
 
         dur = max(120, int(duration_ms * random.uniform(0.90, 1.12)))
-        self._run(
+        proc = self._run(
             [
                 "shell",
                 "input",
@@ -236,6 +245,9 @@ class AdbController:
             serial=serial,
             timeout=4.0,
         )
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", errors="ignore").strip() or proc.stdout.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(f"ADB swipe thất bại (code={proc.returncode}): {err or 'device offline'}")
 
     def get_foreground_package(self, serial: str) -> str:
         """Lấy tên package ứng dụng đang mở trên màn hình Android (dùng cho Watchdog 24/7)."""

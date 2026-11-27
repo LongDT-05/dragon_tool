@@ -883,7 +883,7 @@ class DaoRongBot:
         drag_dur = 0.42 * self._spd
         hold_end = 0.12
         settle = 0.30 * self._spd
-        thr = max(0.83, self._conf("dragon", 0.75))
+        thr = 0.79 if self.vision.is_adb_mode else max(0.82, self._conf("dragon", 0.75))
 
         scr0, rect0 = self.vision.capture_window()
         l_emp0, r_emp0 = self._count_empty_parent_slots(scr0, rect0)
@@ -920,7 +920,8 @@ class DaoRongBot:
                         best_seen[label] = res.score
                     if res.found:
                         rel_x = (res.x - cur_rct.left) / max(1, cur_rct.width)
-                        if 0.180 <= rel_x <= 0.535:
+                        min_rx, max_rx = (0.178, 0.535) if self.vision.is_adb_mode else (0.165, 0.545)
+                        if min_rx <= rel_x <= max_rx:
                             candidates.append((res.score, label, pp, res))
 
                 if not candidates:
@@ -1242,15 +1243,18 @@ class DaoRongBot:
                 self.stop()
                 return BotState.CLASSIFY_AND_ACT
 
+        keep_succeeded = False
         if action == "keep":
             cached_k = self._cached_result_btns.get("btn_keep.png")
             if cached_k is not None:
                 self.input.click(cached_k[0], cached_k[1], post_delay=0.14 * self._spd, stop_check=self.should_stop)
                 self.stats.kept += 1
+                keep_succeeded = True
             else:
                 res_k = self._click_ui("btn_keep.png", timeout=4.0, post_delay=0.16 * self._spd)
                 if res_k and res_k.found:
                     self.stats.kept += 1
+                    keep_succeeded = True
 
         elif action == "sell":
             cached_s = self._cached_result_btns.get("btn_sell.png")
@@ -1317,7 +1321,7 @@ class DaoRongBot:
 
         # Ghi nhận vào Sổ Tay Rồng Vừa Lai (chỉ ghi con Cất thuộc độ hiếm cho phép Hóa Bụi; TUYỆT ĐỐI không ghi con Chúc phúc!)
         id_name, id_rarity, id_stars = getattr(self, "_last_identified", ("", "", None))
-        if action == "keep" and id_rarity and id_stars is not None:
+        if keep_succeeded and id_rarity and id_stars is not None:
             enabled_dr = set(self.config.get("dust_rarities", ["Nguyên Liệu"]))
             max_st = int(self.config.get("dust_max_star", 0) or 0)
             if id_rarity in enabled_dr and (max_st == 0 or id_stars <= max_st):
@@ -1665,13 +1669,19 @@ class DaoRongBot:
         settle = self._timing("scroll_settle_delay", 0.50)
         dust_max_star = int(self.config.get("dust_max_star", 0) or 0)
         only_session = bool(self.config.get("dust_only_session_bred", True))
-        # Chỉ dùng Sổ Tay khi trong phiên đã thực sự lai ra ít nhất 1 con chờ hóa bụi (nếu mở app khi túi đã đầy sẵn -> dùng lọc sao + độ hiếm an toàn)
-        use_ledger = only_session and sum(self._session_dust_ledger.values()) > 0
+        use_ledger = only_session and (str(self.config.get("bot_mode", "breed_and_dust")) != "dust_only")
         if use_ledger:
-            self.log(f"📒 [SỔ HÓA BỤI] Chỉ hóa bụi đúng {sum(self._session_dust_ledger.values())} rồng vừa lai trong đợt này (tự né 100% rồng cũ trong túi)!")
+            tot_l = sum(self._session_dust_ledger.values())
+            if tot_l <= 0:
+                self.log("🛡️ [SỔ HÓA BỤI - DỪNG AN TOÀN] Sổ tay chưa ghi nhận rồng mới lai nào trong phiên này -> Tự DỪNG để bảo vệ 100% rồng cũ trong túi!")
+                self.notifier.send_async(f"🛡️ [{self.account_label}] Túi đầy sẵn từ trước, Sổ Hóa Bụi đã tự dừng để bảo vệ rồng cũ trong túi!")
+                self.stop()
+                return BotState.OPEN_BREED
+            self.log(f"📒 [SỔ HÓA BỤI] Chỉ hóa bụi đúng {tot_l} rồng vừa lai trong đợt này (tự né 100% rồng cũ trong túi)!")
 
         empty_scrolls = 0
         bottom_hit_count = 0
+        dust_fail_count = 0
         skipped_pts: List[Tuple[int, int]] = []
 
         while not self.should_stop():
@@ -1743,11 +1753,19 @@ class DaoRongBot:
                         self.log("[CHẨN ĐOÁN] Phát hiện đang ở nhầm tab Tẩy Tủy -> Bấm lại bình Hóa Bụi!")
                         self.input.click(rb_fix.x, rb_fix.y, post_delay=0.6 * self._spd, stop_check=self.should_stop)
                         continue
+                    dust_fail_count += 1
+                    skipped_pts.append((chosen.x, chosen.y))
+                    self.log(f"[HÓA BỤI] Không thấy nút 'Hóa Bụi' ({dust_fail_count}/3) -> Bỏ qua thẻ này.")
+                    if dust_fail_count >= 3:
+                        self.log("[HÓA BỤI] Lỗi không thấy nút Hóa Bụi liên tiếp 3 lần -> Đóng bảng Hóa Bụi an toàn.")
+                        break
+                    continue
                 if res_dust and res_dust.found:
                     res_cf = self._click_ui(
                         "btn_dust_confirm.png", timeout=2.6, retries=1, post_delay=0.45 * self._spd
                     )
                     if res_cf and res_cf.found:
+                        dust_fail_count = 0
                         self.stats.dusted += 1
                         if use_ledger and chosen_star is not None:
                             lkey = (chosen.name, int(chosen_star))

@@ -386,14 +386,18 @@ class VisionEngine:
         is_ui_tmpl = Path(template_path).parent.name.lower() == "ui"
         eff_ref = self.reference_size if is_ui_tmpl else self.dragon_reference_size
         if not best.found and self.auto_scale and eff_ref[0] > 200:
-            sx = rect.width / float(eff_ref[0])
-            sy = rect.height / float(eff_ref[1])
-            if abs(sx - 1.0) > 0.03 or abs(sy - 1.0) > 0.03:
+            rw, rh = float(eff_ref[0]), float(eff_ref[1])
+            if self.is_adb_mode and rw > 600 and rh > 400:
+                rw -= 36.0
+                rh -= 36.0
+            sx = rect.width / max(200.0, rw)
+            sy = rect.height / max(200.0, rh)
+            if self.is_adb_mode or abs(sx - 1.0) > 0.02 or abs(sy - 1.0) > 0.02:
                 base_img = self._load_template(template_path, target_rect=None)
                 if base_img is not None:
                     bh, bw = base_img.shape[:2]
                     s_avg = (sx + sy) / 2.0
-                    for mult in (1.0, 0.95, 1.05):
+                    for mult in (0.97, 1.03, 0.94, 1.06, 0.90, 1.10):
                         nw = max(6, int(round(bw * s_avg * mult)))
                         nh = max(6, int(round(bh * s_avg * mult)))
                         interp = cv2.INTER_AREA if (s_avg * mult) < 1.0 else cv2.INTER_CUBIC

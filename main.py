@@ -120,11 +120,19 @@ def ensure_directories() -> None:
 
 
 def load_config() -> Dict[str, Any]:
+    cfg: Dict[str, Any] = {}
     if CONFIG_PATH.is_file():
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-    else:
-        cfg = {}
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    cfg = loaded
+        except Exception:
+            try:
+                CONFIG_PATH.replace(CONFIG_PATH.with_suffix(".json.corrupt.bak"))
+            except Exception:
+                pass
+            cfg = {}
     cfg.setdefault("dragon_text_rules", {"bless": [], "keep": [], "sell": []})
     for k in ("bless", "keep", "sell"):
         cfg["dragon_text_rules"].setdefault(k, [])
@@ -1309,8 +1317,33 @@ class DaoRongStudioV10(ctk.CTk):
         self.config_data.update(json.loads(p.read_text(encoding="utf-8")))
         self.config_data["active_profile"] = sel
         save_config(self.config_data)
+        self.var_win_title.set(self.config_data.get("window_title_keyword", "AUTO"))
+        self.var_p1.set(self.config_data.get("selected_parent_1") or "(Chưa có mẫu)")
+        self.var_p2.set(self.config_data.get("selected_parent_2") or "(Chưa có mẫu)")
         self.var_bot_mode_vn.set(self._mode_to_vn.get(self.config_data.get("bot_mode", "breed_and_dust"), "Lai + Hóa Bụi"))
+        self.var_ctrl_mode_vn.set(self._ctrl_to_vn.get(self.config_data.get("control_mode", "windows"), "Chuột chính"))
+        self.var_unknown_vn.set(self._unk_map_to_vn.get(self.config_data.get("unknown_dragon_action", "keep"), "Cất"))
+        self.var_speed_vn.set(self._spd_to_vn.get(self.config_data.get("speed_preset", "fast"), "Nhanh"))
+        self.var_hops.set(str(self.config_data.get("island_hops", 2)))
         self.var_dust_max_star.set(str(self.config_data.get("dust_max_star", 0)))
+        self.var_watchdog_sec.set(str(self.config_data.get("watchdog_seconds", 180)))
+        self.var_adb_path.set(self.config_data.get("adb_path", ""))
+        self.var_dust_only_session.set(bool(self.config_data.get("dust_only_session_bred", True)))
+        self.var_watchdog_relaunch.set(bool(self.config_data.get("watchdog_relaunch", True)))
+        self.var_remote_notify.set(bool(self.config_data.get("enable_remote_notify", False)))
+        self.var_tg_token.set(str(self.config_data.get("telegram_token", "")))
+        self.var_tg_chat.set(str(self.config_data.get("telegram_chat_id", "")))
+        self.var_dc_webhook.set(str(self.config_data.get("discord_webhook", "")))
+        saved_dr = set(self.config_data.get("dust_rarities", ["Nguyên Liệu"]))
+        for r_k, r_v in self.var_dust_rars.items():
+            r_v.set(r_k in saved_dr)
+        as_c = self.config_data.get("auto_stop", {})
+        self.var_as_enabled.set(bool(as_c.get("enabled", False)))
+        self.var_as_mins.set(str(as_c.get("max_minutes", 0)))
+        self.var_as_breeds.set(str(as_c.get("max_breeds", 0)))
+        self.var_as_rare.set(str(as_c.get("stop_on_rare_count", 0)))
+        self.var_as_epic.set(bool(as_c.get("stop_on_epic_or_event", False)))
+        self.adb_ctrl.custom_adb_path = self.var_adb_path.get().strip()
         self._refresh_all_lists()
         self.append_log(f"Đã tải Profile '{sel}'.")
 
@@ -1365,47 +1398,62 @@ class DaoRongStudioV10(ctk.CTk):
             other = [f for f in parent_files if f != self.var_p1.get()]
             self.var_p2.set(other[0] if other else (parent_files[0] if parent_files else "(Chưa có mẫu)"))
 
-    def _save_all_settings(self, silent: bool = False) -> None:
+    def _save_all_settings(self, silent: bool = False) -> bool:
         try:
-            self.config_data["window_title_keyword"] = self.var_win_title.get().strip() or "AUTO"
-            self.config_data["selected_parent_1"] = "" if self.var_p1.get() == "(Chưa có mẫu)" else self.var_p1.get()
-            self.config_data["selected_parent_2"] = "" if self.var_p2.get() == "(Chưa có mẫu)" else self.var_p2.get()
-            self.config_data["bot_mode"] = self._mode_from_vn.get(self.var_bot_mode_vn.get(), "breed_and_dust")
-            self.config_data["control_mode"] = self._ctrl_from_vn.get(self.var_ctrl_mode_vn.get(), "windows")
-            self.config_data["unknown_dragon_action"] = self._unk_map_from_vn.get(self.var_unknown_vn.get(), "keep")
-            self.config_data["speed_preset"] = self._spd_from_vn.get(self.var_speed_vn.get(), "fast")
-            self.config_data["island_hops"] = int(self.var_hops.get() or 2)
-            self.config_data["dust_max_star"] = max(0, int(self.var_dust_max_star.get() or 0))
-            self.config_data["dust_rarities"] = [k for k, v in self.var_dust_rars.items() if v.get()] or ["Nguyên Liệu"]
-            self.config_data["dust_only_session_bred"] = bool(self.var_dust_only_session.get())
-            self.config_data["watchdog_seconds"] = max(0, int(self.var_watchdog_sec.get() or 0))
-            self.config_data["adb_path"] = self.var_adb_path.get().strip()
-            self.config_data["use_color_check"] = True
-            self.config_data["auto_scale_templates"] = True
-            self.config_data["enable_text_ocr"] = True
-            self.config_data["auto_check_update"] = bool(self.var_auto_update.get())
-            self.config_data["human_like_input"] = bool(self.var_human_like.get())
-            self.config_data["human_break_enabled"] = bool(self.var_human_break.get())
-            self.config_data["save_rare_snapshots"] = bool(self.var_save_rare.get())
-            self.config_data["sound_alert"] = bool(self.var_sound_alert.get())
-            self.config_data["verbose_log"] = bool(self.var_verbose_log.get())
-            self.config_data["collect_ai_dataset"] = bool(self.var_collect_ai.get())
-            self.config_data["auto_stop"] = {
-                "enabled": bool(self.var_as_enabled.get()),
-                "max_minutes": max(0, int(self.var_as_mins.get() or 0)),
-                "max_breeds": max(0, int(self.var_as_breeds.get() or 0)),
-                "stop_on_rare_count": max(0, int(self.var_as_rare.get() or 0)),
-                "stop_on_epic_or_event": bool(self.var_as_epic.get()),
-            }
-            acc = self.var_accuracy.get()
-            self.config_data["accuracy_mode"] = acc
-            self.config_data["confidence"] = dict(ACCURACY_PRESETS.get(acc, ACCURACY_PRESETS["Chuẩn"]))
-            save_config(self.config_data)
-            if not silent:
-                self.append_log("Đã lưu toàn bộ cài đặt.")
+            hops_val = int(self.var_hops.get() or 2)
+            dust_max_val = max(0, int(self.var_dust_max_star.get() or 0))
+            wd_sec_val = max(0, int(self.var_watchdog_sec.get() or 0))
+            as_mins_val = max(0, int(self.var_as_mins.get() or 0))
+            as_breeds_val = max(0, int(self.var_as_breeds.get() or 0))
+            as_rare_val = max(0, int(self.var_as_rare.get() or 0))
         except ValueError:
             if not silent:
                 messagebox.showerror("Sai định dạng", "Các ô số (lọc sao, số đảo, hẹn giờ, watchdog) phải là số nguyên.")
+            return False
+
+        self.config_data["window_title_keyword"] = self.var_win_title.get().strip() or "AUTO"
+        self.config_data["selected_parent_1"] = "" if self.var_p1.get() == "(Chưa có mẫu)" else self.var_p1.get()
+        self.config_data["selected_parent_2"] = "" if self.var_p2.get() == "(Chưa có mẫu)" else self.var_p2.get()
+        self.config_data["bot_mode"] = self._mode_from_vn.get(self.var_bot_mode_vn.get(), "breed_and_dust")
+        self.config_data["control_mode"] = self._ctrl_from_vn.get(self.var_ctrl_mode_vn.get(), "windows")
+        self.config_data["unknown_dragon_action"] = self._unk_map_from_vn.get(self.var_unknown_vn.get(), "keep")
+        self.config_data["speed_preset"] = self._spd_from_vn.get(self.var_speed_vn.get(), "fast")
+        self.config_data["island_hops"] = hops_val
+        self.config_data["dust_max_star"] = dust_max_val
+        self.config_data["dust_rarities"] = [k for k, v in self.var_dust_rars.items() if v.get()] or ["Nguyên Liệu"]
+        self.config_data["dust_only_session_bred"] = bool(self.var_dust_only_session.get())
+        self.config_data["watchdog_seconds"] = wd_sec_val
+        self.config_data["adb_path"] = self.var_adb_path.get().strip()
+        self.adb_ctrl.custom_adb_path = self.config_data["adb_path"]
+        self.config_data["use_color_check"] = True
+        self.config_data["auto_scale_templates"] = True
+        self.config_data["enable_text_ocr"] = True
+        self.config_data["auto_check_update"] = bool(self.var_auto_update.get())
+        self.config_data["human_like_input"] = bool(self.var_human_like.get())
+        self.config_data["human_break_enabled"] = bool(self.var_human_break.get())
+        self.config_data["save_rare_snapshots"] = bool(self.var_save_rare.get())
+        self.config_data["sound_alert"] = bool(self.var_sound_alert.get())
+        self.config_data["verbose_log"] = bool(self.var_verbose_log.get())
+        self.config_data["collect_ai_dataset"] = bool(self.var_collect_ai.get())
+        self.config_data["watchdog_relaunch"] = bool(self.var_watchdog_relaunch.get())
+        self.config_data["enable_remote_notify"] = bool(self.var_remote_notify.get())
+        self.config_data["telegram_token"] = self.var_tg_token.get().strip()
+        self.config_data["telegram_chat_id"] = self.var_tg_chat.get().strip()
+        self.config_data["discord_webhook"] = self.var_dc_webhook.get().strip()
+        self.config_data["auto_stop"] = {
+            "enabled": bool(self.var_as_enabled.get()),
+            "max_minutes": as_mins_val,
+            "max_breeds": as_breeds_val,
+            "stop_on_rare_count": as_rare_val,
+            "stop_on_epic_or_event": bool(self.var_as_epic.get()),
+        }
+        acc = self.var_accuracy.get()
+        self.config_data["accuracy_mode"] = acc
+        self.config_data["confidence"] = dict(ACCURACY_PRESETS.get(acc, ACCURACY_PRESETS["Chuẩn"]))
+        save_config(self.config_data)
+        if not silent:
+            self.append_log("Đã lưu toàn bộ cài đặt.")
+        return True
 
     # ------------------------------------------------------------------
     # ĐIỀU KHIỂN CHẠY / TẠM DỪNG / CHẠY LẠI / DỪNG KHẨN CẤP
@@ -1480,24 +1528,28 @@ class DaoRongStudioV10(ctk.CTk):
             btn.configure(text="⏸", fg_color=C["amber"], text_color="#451A03")
 
     def _start_bot(self, restart_from_egg: bool = False) -> None:
-        self._save_all_settings(silent=True)
-        p1 = self.config_data.get("selected_parent_1", "")
-        p2 = self.config_data.get("selected_parent_2", "")
-        if not p1 or not p2:
-            messagebox.showwarning("Chưa chọn cặp rồng", "Hãy chụp và chọn đủ 2 rồng bố mẹ trước khi chạy!")
-            return
-        if p1 == p2:
-            messagebox.showwarning("Trùng cặp rồng bố mẹ", "Rồng bố/mẹ 1 và Rồng bố/mẹ 2 đang chọn giống hệt nhau!\nHãy chọn 2 con khác nhau ở 2 ô Bố/Mẹ.")
+        if not self._save_all_settings(silent=False):
             return
         if self.config_data.get("control_mode", "windows") == "adb":
             sels = [s for s, v in self.adb_device_vars.items() if v.get()]
             if not sels:
                 messagebox.showwarning("Chưa chọn thiết bị ADB", "Hãy bấm 'Quét ADB' và tick ít nhất 1 giả lập!")
                 return
-            self.multi_bots.clear()
-            for idx, serial in enumerate(sels, 1):
+            acc_configs: List[Tuple[str, str, Dict[str, Any]]] = []
+            for serial in sels:
                 prof = self.adb_device_profiles[serial].get() if serial in self.adb_device_profiles else "Mặc định"
                 acc_cfg = self._load_profile_dict(prof)
+                ap1 = acc_cfg.get("selected_parent_1", "")
+                ap2 = acc_cfg.get("selected_parent_2", "")
+                if not ap1 or not ap2:
+                    messagebox.showwarning("Thiếu rồng bố mẹ", f"Thiết bị {serial} (Profile '{prof}') chưa chọn đủ 2 rồng bố mẹ!")
+                    return
+                if ap1 == ap2:
+                    messagebox.showwarning("Trùng cặp rồng bố mẹ", f"Thiết bị {serial} (Profile '{prof}') đang chọn trùng 2 rồng bố mẹ!")
+                    return
+                acc_configs.append((serial, prof, acc_cfg))
+            self.multi_bots.clear()
+            for idx, (serial, prof, acc_cfg) in enumerate(acc_configs, 1):
                 lbl = f"Acc #{idx} ({serial})"
                 bot = DaoRongBot(
                     BASE_DIR, acc_cfg,
@@ -1514,6 +1566,14 @@ class DaoRongStudioV10(ctk.CTk):
             self.btn_play_pause.configure(text="⏸  TẠM DỪNG (Ctrl+Enter)", fg_color=C["amber"], text_color="#451A03")
             return
 
+        p1 = self.config_data.get("selected_parent_1", "")
+        p2 = self.config_data.get("selected_parent_2", "")
+        if not p1 or not p2:
+            messagebox.showwarning("Chưa chọn cặp rồng", "Hãy chụp và chọn đủ 2 rồng bố mẹ trước khi chạy!")
+            return
+        if p1 == p2:
+            messagebox.showwarning("Trùng cặp rồng bố mẹ", "Rồng bố/mẹ 1 và Rồng bố/mẹ 2 đang chọn giống hệt nhau!\nHãy chọn 2 con khác nhau ở 2 ô Bố/Mẹ.")
+            return
         self.bot = DaoRongBot(
             BASE_DIR, self.config_data, self.append_log, self.update_stats,
             alert_callback=self._on_bot_alert, account_label="Chuột chính",

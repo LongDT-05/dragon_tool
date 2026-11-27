@@ -352,17 +352,25 @@ def fix_ocr_word(word: str) -> str:
 
 
 def extract_stars(text: str) -> Optional[int]:
+    """Trích số sao (1-40) từ các dạng: '(23 sao)', '(23)', '23★', '23*', '23 sao', '23s'."""
+    if not text:
+        return None
     norm = normalize_vn(text)
-    # Sửa lỗi OCR đọc số '0' thành chữ 'o' trong số sao (vd '2osac' -> '20sac', '1osa' -> '10sa')
-    norm_s = re.sub(r"(\d)o(?=sa)", r"\g<1>0", norm)
-    m = re.search(r"(\d{1,2})\s*sa[oc]?\b", norm_s)
-    if m:
-        return int(m.group(1))
-    m2 = re.search(r"\((\d{1,2})", norm_s)
-    if m2:
-        return int(m2.group(1))
+    for pat in (
+        r"(\d{1,2})\s*(?:sao|\*|s\b)",
+        r"\(\s*(\d{1,2})\s*\)",
+    ):
+        m = re.search(pat, text if "(" in pat else norm)
+        if m:
+            val = int(m.group(1))
+            if 1 <= val <= 40:
+                return val
+    m_star = re.search(r"(\d{1,2})\s*[★⭐\*]", text)
+    if m_star:
+        val = int(m_star.group(1))
+        if 1 <= val <= 40:
+            return val
     return None
-
 
 def parse_rule_string(rule_str: str) -> Tuple[str, str, Optional[int]]:
     """
