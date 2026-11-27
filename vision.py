@@ -148,6 +148,7 @@ class VisionEngine:
         self.adb_serial = adb_serial
         self._template_cache: Dict[str, Tuple[float, np.ndarray]] = {}
         self._scaled_cache: Dict[Tuple[str, int, int], np.ndarray] = {}
+        self._confirmed_scales: Dict[Tuple[str, int, int], float] = {}
         self._sct = mss.mss() if mss is not None else None
 
     @property
@@ -399,22 +400,34 @@ class VisionEngine:
                 # Khi chưa có cỡ gốc (dragon_reference_window_size = [0, 0]) -> tự thử dải tỷ lệ 0.75..1.30!
                 s_avg = 1.0
                 mults = (0.80, 1.25, 0.90, 1.10, 0.75, 1.30)
-            if True:
-                base_img = self._load_template(template_path, target_rect=None)
-                if base_img is not None:
-                    bh, bw = base_img.shape[:2]
-                    for mult in mults:
-                        nw = max(6, int(round(bw * s_avg * mult)))
-                        nh = max(6, int(round(bh * s_avg * mult)))
-                        interp = cv2.INTER_AREA if (s_avg * mult) < 1.0 else cv2.INTER_CUBIC
-                        cand = cv2.resize(base_img, (nw, nh), interpolation=interp)
-                        m = self.match_image(
-                            search_img, cand, threshold=threshold, offset_x=ox, offset_y=oy, name=name
-                        )
-                        if m.score > best.score:
-                            best = m
-                        if best.found:
-                            break
+            base_img = self._load_template(template_path, target_rect=None)
+            if base_img is not None:
+                bh, bw = base_img.shape[:2]
+                ckey = (str(Path(template_path).resolve()), rect.width, rect.height)
+                cached_m = self._confirmed_scales.get(ckey)
+                if cached_m is not None:
+                    nw = max(6, int(round(bw * cached_m)))
+                    nh = max(6, int(round(bh * cached_m)))
+                    interp = cv2.INTER_AREA if cached_m < 1.0 else cv2.INTER_CUBIC
+                    cand = cv2.resize(base_img, (nw, nh), interpolation=interp)
+                    m_fast = self.match_image(search_img, cand, threshold=threshold, offset_x=ox, offset_y=oy, name=name)
+                    if m_fast.found:
+                        return m_fast
+                best_scale_used = None
+                for mult in mults:
+                    cur_sc = s_avg * mult
+                    nw = max(6, int(round(bw * cur_sc)))
+                    nh = max(6, int(round(bh * cur_sc)))
+                    interp = cv2.INTER_AREA if cur_sc < 1.0 else cv2.INTER_CUBIC
+                    cand = cv2.resize(base_img, (nw, nh), interpolation=interp)
+                    m = self.match_image(
+                        search_img, cand, threshold=threshold, offset_x=ox, offset_y=oy, name=name
+                    )
+                    if m.score > best.score:
+                        best = m
+                        best_scale_used = cur_sc
+                if best.found and best_scale_used is not None:
+                    self._confirmed_scales[ckey] = best_scale_used
         return best
 
     def rank_across_folders(

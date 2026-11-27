@@ -931,11 +931,15 @@ class DaoRongBot:
         raw_e = self._drag_cfg("bottom_drag_end", [0.24, mid_y])
         def _clamp_pt(pt):
             return [
-                max(rx1 + 0.02, min(rx2 - 0.02, float(pt[0]))),
-                max(ry1 + 0.02, min(ry2 - 0.02, float(pt[1]))),
+                max(rx1 + 0.01, min(rx2 - 0.01, float(pt[0]))),
+                max(ry1 + 0.01, min(ry2 - 0.01, float(pt[1]))),
             ]
         start_rel = _clamp_pt(raw_s)
         end_rel = _clamp_pt(raw_e)
+        # Đảm bảo 2 đầu vuốt không bị ép trùng nhau khi vùng quét hẹp
+        if abs(start_rel[0] - end_rel[0]) < 0.06 and (rx2 - rx1) >= 0.10:
+            start_rel[0] = rx2 - 0.03
+            end_rel[0] = rx1 + 0.03
         full_limit = max(1, int(self._drag_cfg("max_parent_scrolls", 24)))
         drag_dur = 0.42 * self._spd
         hold_end = 0.12
@@ -1113,8 +1117,9 @@ class DaoRongBot:
                     return False
 
                 before_roi, _, _ = self.vision.crop_roi(prev_scr, prev_rect, roi)
-                x1, y1 = prev_rect.rel_to_abs(*self.vision.adjust_rel_point(p_from[0], p_from[1]))
-                x2, y2 = prev_rect.rel_to_abs(*self.vision.adjust_rel_point(p_to[0], p_to[1]))
+                # Không gọi adjust_rel_point lần 2 vì tọa độ đã nằm trực tiếp trên khung game!
+                x1, y1 = prev_rect.rel_to_abs(p_from[0], p_from[1])
+                x2, y2 = prev_rect.rel_to_abs(p_to[0], p_to[1])
                 rem_lbl = " & ".join(lb for lb, _ in need)
                 self.log_tech(f"[THANH RỒNG] {dir_name} ({step}/{limit}) tìm {rem_lbl}...")
                 self.input.smooth_drag(
@@ -1144,6 +1149,8 @@ class DaoRongBot:
 
     def _step_select_parents(self) -> BotState:
         self._set_state(BotState.SELECT_PARENTS)
+        self._breed_counted_for_cycle = False
+        self._pair_stats_recorded_for_cycle = False
         if self._check_bag_full():
             return BotState.EXIT_BREED_TO_DUST
 
@@ -1348,16 +1355,25 @@ class DaoRongBot:
             mem_hit = self.name_cache.match(name_crop, res_key, threshold=0.89)
             if mem_hit is not None:
                 c_name, c_rar, c_stars, c_sc = mem_hit
-                self._last_identified = (c_name, c_rar, c_stars)
-                synth_txt = f"{c_name} ({c_stars} sao)" if c_stars else c_name
-                tm_mem = self.text_matcher.match_text_against_rules(synth_txt, text_rules)
-                if tm_mem.found:
-                    action = tm_mem.category
-                    dt_ms = (time.perf_counter() - t_start) * 1000.0
-                    act_vn = {"bless": "Chúc phúc & Cất", "keep": "Cất túi", "sell": "Bán ngay"}[action]
-                    st_str = f" ({c_stars}★)" if c_stars else ""
-                    self.log(f"⚡ Lai ra: {c_name}{st_str} [{c_rar}] → {act_vn} ({dt_ms:.0f}ms)")
-                    self.log_tech(f"[AI CACHE HIT] '{c_name}' score={c_sc:.2f} ({dt_ms:.1f}ms) -> {action}")
+                star_conflict = False
+                if c_stars is not None and self.text_matcher.is_available:
+                    from ocr_engine import extract_stars as _ext_st2
+                    ocr_chk = self.text_matcher.read_name_crop(name_crop)
+                    st_chk = _ext_st2(ocr_chk or "")
+                    if st_chk is not None and st_chk != c_stars:
+                        star_conflict = True
+                        self.log_tech(f"[AI CACHE] Bỏ qua mẫu nhớ {c_stars}★ vì OCR đọc được {st_chk}★!")
+                if not star_conflict:
+                    self._last_identified = (c_name, c_rar, c_stars)
+                    synth_txt = f"{c_name} ({c_stars} sao)" if c_stars else c_name
+                    tm_mem = self.text_matcher.match_text_against_rules(synth_txt, text_rules)
+                    if tm_mem.found:
+                        action = tm_mem.category
+                        dt_ms = (time.perf_counter() - t_start) * 1000.0
+                        act_vn = {"bless": "Chúc phúc & Cất", "keep": "Cất túi", "sell": "Bán ngay"}[action]
+                        st_str = f" ({c_stars}★)" if c_stars else ""
+                        self.log(f"⚡ Lai ra: {c_name}{st_str} [{c_rar}] → {act_vn} ({dt_ms:.0f}ms)")
+                        self.log_tech(f"[AI CACHE HIT] '{c_name}' score={c_sc:.2f} ({dt_ms:.1f}ms) -> {action}")
 
         # ƯU TIÊN 2: Ảnh mẫu tự chụp (chỉ quét nếu thư mục thực sự có ảnh .png!)
         best_name_img, best_baby_img = None, None
@@ -1900,6 +1916,7 @@ class DaoRongBot:
 
             chosen: Optional[MatchResult] = None
             chosen_star: Optional[int] = None
+            chosen_spr_idx: Optional[int] = None
             for cand in candidates:
                 if any(abs(cand.x - sx) < 30 and abs(cand.y - sy) < 30 for sx, sy in skipped_pts):
                     continue
@@ -1940,11 +1957,14 @@ class DaoRongBot:
                         c_box = screen[ct:min(rect.height, ct + int(115 * sy_d)), cl:min(rect.width, cl + int(145 * sx_d))]
                         c_hist = self._dragon_hsv_hist(c_box)
                         if c_hist is not None:
-                            best_sp = max(float(cv2.compareHist(c_hist, sh, cv2.HISTCMP_CORREL)) for sh in spr_list)
+                            sims = [float(cv2.compareHist(c_hist, sh, cv2.HISTCMP_CORREL)) for sh in spr_list]
+                            best_idx = int(np.argmax(sims))
+                            best_sp = sims[best_idx]
                             if best_sp < 0.72:
                                 self.log(f"🛡️ [SỔ HÓA BỤI] Bỏ qua thẻ trùng {cand.name} {c_star}★ nhưng khác màu rồng vừa lai (khớp={best_sp:.2f})!")
                                 skipped_pts.append((cand.x, cand.y))
                                 continue
+                            chosen_spr_idx = best_idx
 
                 chosen = cand
                 chosen_star = c_star
@@ -1953,13 +1973,11 @@ class DaoRongBot:
             if chosen is not None:
                 empty_scrolls = 0
                 bottom_hit_count = 0
-                off_rel = self._drag_cfg("dust_click_offset_rel", [0.038, 0.040])
-                is_badge_crop = (chosen.w < rect.width * 0.09) or (chosen.h < rect.height * 0.09)
-                dx = int(rect.width * float(off_rel[0])) if is_badge_crop else 0
-                dy = int(rect.height * float(off_rel[1])) if is_badge_crop else 0
-                click_x = chosen.x + dx
-                click_y = chosen.y + dy
-                col_side = "Cột TRÁI" if click_x < (rect.left + rect.width * 0.77) else "Cột PHẢI"
+                is_left_col = chosen.x < (rect.left + rect.width * 0.77)
+                col_side = "Cột TRÁI" if is_left_col else "Cột PHẢI"
+                # Tâm ngang chuẩn theo đúng cột (cột trái ~70.5%, cột phải ~83.5%), không cộng lệch +48px ra ngoài thẻ!
+                click_x = int(rect.left + rect.width * (0.705 if is_left_col else 0.835))
+                click_y = chosen.y + int(rect.height * 0.045)
 
                 # Xác minh lại ngay trước khi bấm Hóa Bụi: kiểm tra khóa / cấm bụi trên khung hình tươi!
                 if self._is_card_locked(screen, rect, chosen.x, chosen.y, chosen.w, chosen.h) or self._is_card_protected(screen, rect, chosen.x, chosen.y, chosen.w, chosen.h):
@@ -1981,6 +1999,10 @@ class DaoRongBot:
                 ph, pw = post_scr.shape[:2]
                 preview_box = post_scr[int(ph * 0.25):int(ph * 0.45), int(pw * 0.27):int(pw * 0.41)]
                 preview_hist = self._dragon_hsv_hist(preview_box)
+                if preview_box.size == 0 or float(preview_box.std()) < 18.0:
+                    self.log("🛡️ [XÁC MINH SAU CLICK] Ô Xem Trước Hóa Bụi đang trống/tối -> Không bấm Xác nhận!")
+                    skipped_pts.append((chosen.x, chosen.y))
+                    continue
                 if pre_card_hist is not None and preview_hist is not None:
                     pv_sim = float(cv2.compareHist(pre_card_hist, preview_hist, cv2.HISTCMP_CORREL))
                     if pv_sim < 0.65:
@@ -2017,6 +2039,10 @@ class DaoRongBot:
                             lkey = (chosen.name, int(chosen_star))
                             if self._session_dust_ledger.get(lkey, 0) > 0:
                                 self._session_dust_ledger[lkey] -= 1
+                            if chosen_spr_idx is not None and lkey in self._session_dust_sprites:
+                                lst_sp = self._session_dust_sprites[lkey]
+                                if 0 <= chosen_spr_idx < len(lst_sp):
+                                    lst_sp.pop(chosen_spr_idx)
                         self.on_stats(self.stats)
                         skipped_pts.clear()
                         rem = sum(self._session_dust_ledger.values()) if use_ledger else -1
