@@ -133,9 +133,14 @@ def load_config() -> Dict[str, Any]:
             except Exception:
                 pass
             cfg = {}
-    cfg.setdefault("dragon_text_rules", {"bless": [], "keep": [], "sell": []})
+    if not isinstance(cfg.get("dragon_text_rules"), dict):
+        cfg["dragon_text_rules"] = {"bless": [], "keep": [], "sell": []}
     for k in ("bless", "keep", "sell"):
-        cfg["dragon_text_rules"].setdefault(k, [])
+        if not isinstance(cfg["dragon_text_rules"].get(k), list):
+            cfg["dragon_text_rules"][k] = []
+    for dict_k in ("drag", "timing", "timings", "auto_stop", "confidence"):
+        if dict_k in cfg and not isinstance(cfg.get(dict_k), dict):
+            cfg[dict_k] = {}
     cfg.setdefault("accuracy_mode", "Chuẩn")
     cfg.setdefault("bot_mode", "breed_and_dust")
     cfg.setdefault("control_mode", "windows")
@@ -148,7 +153,11 @@ def load_config() -> Dict[str, Any]:
     cfg.setdefault("verbose_log", False)
     # Tự động nâng cấp thông số vuốt thanh rồng & khung quét cho người dùng nâng từ bản cũ (< v11.0)
     # mà vẫn giữ nguyên 100% luật rồng, cặp bố mẹ, ghim tọa độ và hồ sơ!
-    if int(cfg.get("config_schema_version", 0) or 0) < 12:
+    try:
+        _schema_v = int(cfg.get("config_schema_version", 0) or 0)
+    except (TypeError, ValueError):
+        _schema_v = 0
+    if _schema_v < 12:
         drag = cfg.setdefault("drag", {})
         drag["bottom_bar_roi"] = [0.15, 0.62, 0.61, 0.89]
         drag["bottom_drag_start"] = [0.44, 0.75]
@@ -161,7 +170,7 @@ def load_config() -> Dict[str, Any]:
         cfg["config_schema_version"] = 12
     # v12.1: Khôi phục ui_reference_window_size về chuẩn [1330, 761] của bộ nút UI tích hợp sẵn
     # (tránh lỗi bấm 'Lưu cỡ giả lập' khi cửa sổ nhỏ làm phóng đại sai toàn bộ 22 nút UI!)
-    if int(cfg.get("config_schema_version", 0) or 0) < 13:
+    if _schema_v < 13:
         cfg["ui_reference_window_size"] = [1330, 761]
         cfg["config_schema_version"] = 13
         try:

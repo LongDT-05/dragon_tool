@@ -58,22 +58,25 @@ class NaturalRuleParser:
         self._norm_catalog.sort(key=lambda x: len(x[2]), reverse=True)
 
     def _extract_star_condition(self, clause_raw: str) -> Tuple[str, Optional[int]]:
-        cn = normalize_vn(clause_raw)
         raw_low = (clause_raw or "").lower()
-        has_ge = (">=" in raw_low) or (">=" in cn) or any(k in cn for k in ("tu ", "tro len", "lon hon", "tren "))
-        m_num = re.search(r"(\d{1,2})\s*(?:sao|\*|★)?", raw_low if ">=" in raw_low else cn)
-        if m_num and has_ge:
-            val = int(m_num.group(1))
+        cn = normalize_vn(clause_raw)
+        has_ge = (">=" in raw_low) or any(k in cn for k in ("tu ", "tro len", "lon hon", "tren "))
+        # Kiểm tra trước nếu có số bất kỳ đi kèm điều kiện sao
+        m_any_num = re.search(r"(?<!\d)(\d{1,3})(?!\d)", raw_low if ">=" in raw_low else cn)
+        if m_any_num and has_ge:
+            val = int(m_any_num.group(1))
             if ("tren " in cn or "lon hon" in cn) and "tro len" not in cn and ">=" not in raw_low and "tu " not in cn:
                 val += 1
             if 1 <= val <= 40:
                 return ">=", val
+            return "invalid", None
 
-        m_eq = re.search(r"(?:dung\s*|=\s*|\(\s*)?(\d{1,2})\s*(?:sao|\*|★)", raw_low if "★" in raw_low else cn)
+        m_eq = re.search(r"(?:dung\s*|=\s*|\(\s*)?(?<!\d)(\d{1,3})(?!\d)\s*(?:sao|\*|★)", raw_low if "★" in raw_low else cn)
         if m_eq:
             val = int(m_eq.group(1))
             if 1 <= val <= 40:
                 return "=", val
+            return "invalid", None
 
         return "any", None
 
@@ -103,14 +106,17 @@ class NaturalRuleParser:
         if not raw:
             return {"rules": result, "summary": [], "matched_count": 0}
 
-        # Bỏ dấu trước khi tách mệnh đề để bắt chuẩn 'nhưng', 'còn lại', 'riêng', 'trừ khi'!
-        clauses = [c.strip() for c in re.split(r"[,;\n.]+", normalize_vn(raw)) if c.strip()]
+        # Tách câu theo dấu phẩy, chấm phẩy, xuống dòng, dấu chấm TRƯỚC khi bỏ dấu!
+        clauses = [c.strip() for c in re.split(r"[,;\n.]+", raw) if c.strip()]
         expanded: List[str] = []
         for c in clauses:
-            sub = re.split(r"\b(?:con lai|nhung|rieng|tru khi)\b", c, flags=re.IGNORECASE)
+            c_norm = normalize_vn(c)
+            sub = re.split(r"\b(?:con lai|nhung|rieng|tru khi)\b", c_norm, flags=re.IGNORECASE)
             for s in sub:
                 if s.strip():
-                    expanded.append(s.strip())
+                    # Giữ lại ký hiệu '>=' hoặc '★' nếu có ở mệnh đề gốc
+                    prefix = ">= " if ">=" in c and ">=" not in s else ""
+                    expanded.append((prefix + s.strip()).strip())
 
         last_action: Optional[str] = None
         for clause in expanded:
@@ -119,7 +125,9 @@ class NaturalRuleParser:
             if not act:
                 continue
             last_action = act
-            star_op, star_val = self._extract_star_condition(cn)
+            star_op, star_val = self._extract_star_condition(clause)
+            if star_op == "invalid":
+                continue
 
             matched_names: List[str] = []
             # 1. Tìm tên rồng cụ thể trong mệnh đề
@@ -191,10 +199,17 @@ class PersistentNameCache:
         self._load()
 
     @staticmethod
+    def _has_text_signal(crop_bgr: np.ndarray) -> bool:
+        if crop_bgr is None or crop_bgr.size == 0:
+            return False
+        gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if crop_bgr.ndim == 3 else crop_bgr
+        # Phải có ít nhất 1.5% điểm ảnh chữ sáng (>=135) và độ tương phản đủ rõ
+        return float(np.mean(gray >= 135)) >= 0.015 and float(gray.std()) >= 12.0
+
+    @staticmethod
     def _make_sig(crop_bgr: np.ndarray, size: Tuple[int, int] = (200, 40)) -> np.ndarray:
         """Trích chữ sáng trên nền tối thành chữ ký chuẩn hóa (miễn nhiễm rung nền & sai lệch 1-3px)."""
         gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if crop_bgr.ndim == 3 else crop_bgr
-        # Lọc bỏ nền xanh tối (<105), giữ nổi bật chữ vàng/hồng/trắng của tên rồng + số sao
         boosted = np.clip((gray.astype(np.float32) - 100.0) * 2.1, 0, 255).astype(np.uint8)
         return cv2.resize(boosted, size, interpolation=cv2.INTER_AREA)
 
@@ -233,7 +248,7 @@ class PersistentNameCache:
         self, name_crop: np.ndarray, res_key: str, threshold: float = 0.89
     ) -> Optional[Tuple[str, str, Optional[int], float]]:
         """Trả về (canon_name, rarity, stars, score) trong ~1ms nhờ chữ ký chữ sáng có dung sai ±3px."""
-        if name_crop is None or name_crop.size == 0 or not self._sigs:
+        if not self._has_text_signal(name_crop) or not self._sigs:
             return None
         # Cùng tỷ lệ 200x40 so với lõi 190x34 -> tự trượt ±5px ngang & ±3px dọc chống lệch khung!
         q_sig = self._make_sig(name_crop, (200, 40))
@@ -265,7 +280,7 @@ class PersistentNameCache:
         rarity: str,
         stars: Optional[int],
     ) -> None:
-        if name_crop is None or name_crop.size == 0 or not canon_name:
+        if not self._has_text_signal(name_crop) or not canon_name:
             return
         safe_id = re.sub(r"[^a-z0-9_]+", "_", normalize_vn(canon_name)).strip("_")
         star_tag = str(stars) if stars is not None else "any"
