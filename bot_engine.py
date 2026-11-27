@@ -158,6 +158,9 @@ class DaoRongBot:
         self._cached_result_btns: Dict[str, Tuple[int, int]] = {}
         self._cached_result_frame = None
         self._pre_identified = None
+        self._breed_counted_for_cycle = False
+        self._keep_retry_count = 0
+        self._session_dust_sprites: Dict[Tuple[str, int], List[np.ndarray]] = {}
         self._learned_name_cache: List[Tuple[Any, str, str]] = []
         self._consecutive_failures = 0
         self.ocr_dict = OcrAdaptiveDictionary(self.base_dir / "ocr_learned_map.json")
@@ -942,6 +945,9 @@ class DaoRongBot:
             scr0, rect0 = self.vision.capture_window()
             l_emp0, r_emp0 = self._count_empty_parent_slots(scr0, rect0)
             slots_needed = int(l_emp0) + int(r_emp0)
+            if slots_needed == 0:
+                self.log("⚠️ [KIỂM CHỨNG] Gỡ ô bố mẹ không làm ô trống đi -> Dừng bấm Lai để tránh lai sai cặp!")
+                return False
 
         need: List[Tuple[str, Path]] = [("Rồng 1", p1_path), ("Rồng 2", p2_path)]
         best_seen: Dict[str, float] = {"Rồng 1": 0.0, "Rồng 2": 0.0}
@@ -971,7 +977,7 @@ class DaoRongBot:
                         best_seen[label] = res.score
                     if res.found:
                         rel_x = (res.x - cur_rct.left) / max(1, cur_rct.width)
-                        min_rx, max_rx = (0.150, 0.605)
+                        min_rx, max_rx = max(0.05, float(roi[0]) - 0.02), min(0.95, float(roi[2]) + 0.02)
                         if min_rx <= rel_x <= max_rx:
                             candidates.append((res.score, label, pp, res))
 
@@ -1020,13 +1026,22 @@ class DaoRongBot:
                     break
             return cur_scr, cur_rct
 
-        prev_scr, prev_rect = _try_pick_visible(scr0, rect0)
-        if picked_count >= 2 or not need:
-            ok_pair, bad_slots = self._verify_both_slots_bijection(prev_scr, p1_path, p2_path)
-            if ok_pair or (self._parent_slot_hists.get(p1_path.name) is None or self._parent_slot_hists.get(p2_path.name) is None):
+        def _confirm_final_slots(cur_s: np.ndarray, cur_r: WindowRect) -> bool:
+            if need:
+                return False
+            ok_pair, bad_slots = self._verify_both_slots_bijection(cur_s, p1_path, p2_path)
+            if ok_pair:
                 return True
-            for s_idx in bad_slots:
-                self._click_upper_slot(prev_rect, s_idx)
+            if self._parent_slot_hists.get(p1_path.name) is not None and self._parent_slot_hists.get(p2_path.name) is not None:
+                for s_idx in bad_slots:
+                    self._click_upper_slot(cur_r, s_idx)
+                return False
+            return True
+
+        prev_scr, prev_rect = _try_pick_visible(scr0, rect0)
+        if picked_count >= 2 and not need:
+            if _confirm_final_slots(prev_scr, prev_rect):
+                return True
             return False
 
         pref_dir = self.dir_memory.preferred_direction(p1_path.name, p2_path.name)
@@ -1064,9 +1079,11 @@ class DaoRongBot:
                 after_scr, after_rect = self.vision.capture_window()
                 after_roi, _, _ = self.vision.crop_roi(after_scr, after_rect, roi)
                 prev_scr, prev_rect = _try_pick_visible(after_scr, after_rect)
-                if picked_count >= 2 or not need:
-                    self.dir_memory.record(p1_path.name, p2_path.name, dir_code)
-                    return True
+                if picked_count >= 2 and not need:
+                    if _confirm_final_slots(prev_scr, prev_rect):
+                        self.dir_memory.record(p1_path.name, p2_path.name, dir_code)
+                        return True
+                    return False
 
                 if compute_frame_diff(before_roi, after_roi) < 1.2:
                     stuck_count += 1
@@ -1114,6 +1131,8 @@ class DaoRongBot:
                 self.input.click(res.x, res.y, post_delay=0.10, stop_check=self.should_stop)
 
         self._consecutive_failures = 0
+        self._breed_counted_for_cycle = False
+        self._keep_retry_count = 0
         return BotState.WAIT_BREED_RESULT
 
     # ------------------------------------------------------------------
@@ -1191,7 +1210,7 @@ class DaoRongBot:
                         synth_txt = f"{c_name} ({c_stars} sao)" if c_stars else c_name
                         tm_mem = self.text_matcher.match_text_against_rules(synth_txt, text_rules)
                         if tm_mem.found:
-                            self._pre_identified = (tm_mem.category, c_name, c_rar, c_stars, c_sc)
+                            self._pre_identified = (tm_mem.category, c_name, c_rar, c_stars, c_sc, nc.copy())
 
             found_btns: Dict[str, Tuple[int, int]] = {}
             for bname in result_buttons:
@@ -1208,8 +1227,10 @@ class DaoRongBot:
             if len(found_btns) >= 2 or "btn_keep.png" in found_btns:
                 self._cached_result_btns = found_btns
                 self._cached_result_frame = (screen, rect)
-                self.stats.breeds += 1
-                self.on_stats(self.stats)
+                if not self._breed_counted_for_cycle:
+                    self.stats.breeds += 1
+                    self._breed_counted_for_cycle = True
+                    self.on_stats(self.stats)
                 return BotState.CLASSIFY_AND_ACT
 
             time.sleep(0.035)
@@ -1245,12 +1266,22 @@ class DaoRongBot:
         name_crop = None
 
         if getattr(self, "_pre_identified", None) is not None:
-            action, c_name, c_rar, c_stars, c_sc = self._pre_identified
+            pre_act, c_name, c_rar, c_stars, c_sc, nc_pre = self._pre_identified
             self._pre_identified = None
-            self._last_identified = (c_name, c_rar, c_stars)
-            act_vn = {"bless": "Chúc phúc & Cất", "keep": "Cất túi", "sell": "Bán ngay"}[action]
-            st_str = f" ({c_stars}★)" if c_stars else ""
-            self.log(f"⚡ Lai ra: {c_name}{st_str} [{c_rar}] → {act_vn} (nhớ trước 0ms)")
+            nc_now, _, _ = self.vision.crop_roi(screen, rect, name_roi)
+            # Chỉ dùng kết quả nhận diện sớm nếu vùng tên trên khung hiện tại KHÔNG đổi so với khung sớm!
+            if (
+                PersistentNameCache._has_text_signal(nc_now)
+                and nc_now.shape == nc_pre.shape
+                and float(cv2.matchTemplate(nc_pre, nc_now, cv2.TM_CCOEFF_NORMED)[0, 0]) >= 0.94
+            ):
+                action = pre_act
+                self._last_identified = (c_name, c_rar, c_stars)
+                act_vn = {"bless": "Chúc phúc & Cất", "keep": "Cất túi", "sell": "Bán ngay"}[action]
+                st_str = f" ({c_stars}★)" if c_stars else ""
+                self.log(f"⚡ Lai ra: {c_name}{st_str} [{c_rar}] → {act_vn} (nhớ trước 0ms)")
+            else:
+                self.log_tech("[NHẬN DIỆN SỚM] Vùng tên đã thay đổi trên khung nút -> Đọc lại trực tiếp!")
 
         # ƯU TIÊN 1 (SIÊU TỐC < 1.5ms): AI Bộ Nhớ Tự Học Vĩnh Viễn — KIỂM TRA TRƯỚC TIÊN, KHÔNG CHỜ QUÉT THƯ MỤC!
         if action is None and has_rules and self.name_cache.count > 0:
@@ -1410,6 +1441,15 @@ class DaoRongBot:
             if id_rarity in enabled_dr and (max_st == 0 or id_stars <= max_st):
                 lkey = (id_rarity, int(id_stars))
                 self._session_dust_ledger[lkey] = self._session_dust_ledger.get(lkey, 0) + 1
+                # Lưu thêm bảng màu sprite rồng vừa lai để đối chiếu khi Hóa Bụi
+                try:
+                    sh_i, sw_i = screen.shape[:2]
+                    spr = screen[int(sh_i * 0.25):int(sh_i * 0.45), int(sw_i * 0.30):int(sw_i * 0.43)]
+                    shist = self._dragon_hsv_hist(spr)
+                    if shist is not None:
+                        self._session_dust_sprites.setdefault(lkey, []).append(shist)
+                except Exception:
+                    pass
                 self.log_tech(f"[SỔ HÓA BỤI] +1 ({id_rarity}, {id_stars}★) -> tổng chờ bụi: {sum(self._session_dust_ledger.values())}")
         try:
             self.pair_stats.record_breed(
@@ -1454,8 +1494,17 @@ class DaoRongBot:
         self.input.sleep_interruptible(0.12 * self._spd, self.should_stop)
         if self._check_bag_full():
             return BotState.EXIT_BREED_TO_DUST
-        if action == "keep" and not keep_succeeded and not self.should_stop():
-            self.log("[PHỤC HỒI] Chưa bấm được nút Cất rồng -> Giữ ở màn kết quả để thử lại.")
+        if keep_succeeded:
+            self._keep_retry_count = 0
+        elif action == "keep" and not self.should_stop():
+            self._keep_retry_count += 1
+            if self._keep_retry_count >= 3:
+                self._trigger_alert_and_pause(
+                    "Không thấy nút Cất rồng!",
+                    "Thử bấm Cất rồng 3 lần không được — tool đã tạm dừng để tránh mất rồng.",
+                )
+                return BotState.WAIT_BREED_RESULT
+            self.log(f"[PHỤC HỒI] Chưa bấm được nút Cất rồng ({self._keep_retry_count}/3) -> Thử lại.")
             return BotState.WAIT_BREED_RESULT
 
         return BotState.SELECT_PARENTS
@@ -1830,6 +1879,11 @@ class DaoRongBot:
                 click_y = chosen.y + dy
                 col_side = "Cột TRÁI" if click_x < (rect.left + rect.width * 0.77) else "Cột PHẢI"
 
+                # Xác minh lại ngay trước khi bấm Hóa Bụi: kiểm tra khóa / cấm bụi trên khung hình tươi!
+                if self._is_card_locked(screen, rect, chosen.x, chosen.y, chosen.w, chosen.h) or self._is_card_protected(screen, rect, chosen.x, chosen.y, chosen.w, chosen.h):
+                    self.log("🛡️ [XÁC MINH LẠI] Thẻ vừa chọn có dấu bảo vệ/khóa -> Bỏ qua an toàn!")
+                    skipped_pts.append((chosen.x, chosen.y))
+                    continue
                 self.log(f"[HÓA BỤI] {col_side} ({chosen.score:.2f}) -> Click giữa rồng ({click_x}, {click_y}).")
                 self.input.click(click_x, click_y, post_delay=0.45 * self._spd, stop_check=self.should_stop)
 
