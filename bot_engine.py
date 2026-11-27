@@ -925,9 +925,18 @@ class DaoRongBot:
         4. Kéo quãng chuẩn ~2.2 thẻ/nhịp (0.48 -> 0.24 trong 0.42s) để đi hết thanh rồng dài mà không bỏ sót.
         """
         roi = self._drag_cfg("bottom_bar_roi", [0.15, 0.62, 0.61, 0.89])
-        start_rel = [0.48, 0.75]
-        end_rel = [0.24, 0.75]
-        full_limit = max(35, int(self._drag_cfg("max_parent_scrolls", 16)) * 2)
+        rx1, ry1, rx2, ry2 = float(roi[0]), float(roi[1]), float(roi[2]), float(roi[3])
+        mid_y = (ry1 + ry2) / 2.0
+        raw_s = self._drag_cfg("bottom_drag_start", [0.48, mid_y])
+        raw_e = self._drag_cfg("bottom_drag_end", [0.24, mid_y])
+        def _clamp_pt(pt):
+            return [
+                max(rx1 + 0.02, min(rx2 - 0.02, float(pt[0]))),
+                max(ry1 + 0.02, min(ry2 - 0.02, float(pt[1]))),
+            ]
+        start_rel = _clamp_pt(raw_s)
+        end_rel = _clamp_pt(raw_e)
+        full_limit = max(1, int(self._drag_cfg("max_parent_scrolls", 24)))
         drag_dur = 0.42 * self._spd
         hold_end = 0.12
         settle = 0.30 * self._spd
@@ -1317,7 +1326,7 @@ class DaoRongBot:
                 from ocr_engine import extract_stars as _ext_stars
                 ocr_now = self.text_matcher.read_name_crop(nc_now)
                 st_now = _ext_stars(ocr_now or "")
-                if st_now is not None and c_stars is not None and st_now != c_stars:
+                if c_stars is not None and (st_now is None or st_now != c_stars):
                     star_ok = False
             if (
                 star_ok
@@ -1560,6 +1569,10 @@ class DaoRongBot:
             self.log(f"[PHỤC HỒI] Chưa bấm được nút Cất rồng ({self._keep_retry_count}/3) -> Thử lại.")
             return BotState.WAIT_BREED_RESULT
 
+        self._breed_counted_for_cycle = False
+        self._pair_stats_recorded_for_cycle = False
+        if self._check_bag_full():
+            return BotState.EXIT_BREED_TO_DUST
         return BotState.SELECT_PARENTS
 
     def _check_auto_stop_conditions(self, id_name: str, id_rarity: str, id_stars: Optional[int]) -> None:
@@ -1917,18 +1930,21 @@ class DaoRongBot:
                             skipped_pts.append((cand.x, cand.y))
                             continue
                         spr_list = self._session_dust_sprites.get(lkey, [])
-                        if spr_list:
-                            sx_d, sy_d = rect.width / 1330.0, rect.height / 761.0
-                            cl = max(0, (cand.x - rect.left) - int(28 * sx_d))
-                            ct = max(0, (cand.y - rect.top) - int(18 * sy_d))
-                            c_box = screen[ct:min(rect.height, ct + int(115 * sy_d)), cl:min(rect.width, cl + int(145 * sx_d))]
-                            c_hist = self._dragon_hsv_hist(c_box)
-                            if c_hist is not None:
-                                best_sp = max(float(cv2.compareHist(c_hist, sh, cv2.HISTCMP_CORREL)) for sh in spr_list)
-                                if best_sp < 0.72:
-                                    self.log(f"🛡️ [SỔ HÓA BỤI] Bỏ qua thẻ trùng {cand.name} {c_star}★ nhưng khác màu rồng vừa lai (khớp={best_sp:.2f})!")
-                                    skipped_pts.append((cand.x, cand.y))
-                                    continue
+                        if not spr_list:
+                            self.log(f"🛡️ [SỔ HÓA BỤI] Thiếu bằng chứng mẫu màu phiên cho {cand.name} {c_star}★ -> Bỏ qua an toàn!")
+                            skipped_pts.append((cand.x, cand.y))
+                            continue
+                        sx_d, sy_d = rect.width / 1330.0, rect.height / 761.0
+                        cl = max(0, (cand.x - rect.left) - int(28 * sx_d))
+                        ct = max(0, (cand.y - rect.top) - int(18 * sy_d))
+                        c_box = screen[ct:min(rect.height, ct + int(115 * sy_d)), cl:min(rect.width, cl + int(145 * sx_d))]
+                        c_hist = self._dragon_hsv_hist(c_box)
+                        if c_hist is not None:
+                            best_sp = max(float(cv2.compareHist(c_hist, sh, cv2.HISTCMP_CORREL)) for sh in spr_list)
+                            if best_sp < 0.72:
+                                self.log(f"🛡️ [SỔ HÓA BỤI] Bỏ qua thẻ trùng {cand.name} {c_star}★ nhưng khác màu rồng vừa lai (khớp={best_sp:.2f})!")
+                                skipped_pts.append((cand.x, cand.y))
+                                continue
 
                 chosen = cand
                 chosen_star = c_star
@@ -1950,19 +1966,25 @@ class DaoRongBot:
                     self.log("🛡️ [XÁC MINH LẠI] Thẻ vừa chọn có dấu bảo vệ/khóa -> Bỏ qua an toàn!")
                     skipped_pts.append((chosen.x, chosen.y))
                     continue
+                # Lưu bảng màu thẻ dự kiến trước khi click để đối chiếu với khung Xem Trước bên trái sau khi click!
+                sx_c, sy_c = rect.width / 1330.0, rect.height / 761.0
+                c_l = max(0, (chosen.x - rect.left) - int(28 * sx_c))
+                c_t = max(0, (chosen.y - rect.top) - int(18 * sy_c))
+                pre_card_box = screen[c_t:min(rect.height, c_t + int(115 * sy_c)), c_l:min(rect.width, c_l + int(145 * sx_c))]
+                pre_card_hist = self._dragon_hsv_hist(pre_card_box)
+
                 self.log(f"[HÓA BỤI] {col_side} ({chosen.score:.2f}) -> Click giữa rồng ({click_x}, {click_y}).")
                 self.input.click(click_x, click_y, post_delay=0.45 * self._spd, stop_check=self.should_stop)
 
-                # Chụp khung hình MỚI sau khi click chọn thẻ để xác minh lại trước khi bấm Hóa Bụi -> Xác nhận!
+                # Chụp khung hình MỚI và kiểm tra đúng khung XEM TRƯỚC BÊN TRÁI (nơi rồng vừa chọn nhảy vào!)
                 post_scr, post_rect = self.vision.capture_window()
-                if self._is_card_locked(post_scr, post_rect, chosen.x, chosen.y, chosen.w, chosen.h) or self._is_card_protected(post_scr, post_rect, chosen.x, chosen.y, chosen.w, chosen.h):
-                    self.log("🛡️ [XÁC MINH SAU CLICK] Thẻ đang chọn có dấu khóa/Cấm Bụi trên khung mới -> Dừng bấm Hóa Bụi!")
-                    skipped_pts.append((chosen.x, chosen.y))
-                    continue
-                if dust_max_star > 0:
-                    post_star = self._read_card_star(post_scr, post_rect, chosen.x, chosen.y, chosen.w, chosen.h)
-                    if post_star is None or post_star > dust_max_star:
-                        self.log(f"🛡️ [XÁC MINH SAU CLICK] Thẻ thay đổi sao ({post_star}★) trên khung mới -> Bỏ qua an toàn!")
+                ph, pw = post_scr.shape[:2]
+                preview_box = post_scr[int(ph * 0.25):int(ph * 0.45), int(pw * 0.27):int(pw * 0.41)]
+                preview_hist = self._dragon_hsv_hist(preview_box)
+                if pre_card_hist is not None and preview_hist is not None:
+                    pv_sim = float(cv2.compareHist(pre_card_hist, preview_hist, cv2.HISTCMP_CORREL))
+                    if pv_sim < 0.65:
+                        self.log(f"🛡️ [XÁC MINH SAU CLICK] Rồng vào ô Hóa Bụi khác thẻ dự kiến (khớp={pv_sim:.2f}) -> Không bấm Xác nhận!")
                         skipped_pts.append((chosen.x, chosen.y))
                         continue
 

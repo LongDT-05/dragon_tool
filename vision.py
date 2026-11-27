@@ -385,19 +385,25 @@ class VisionEngine:
         # Multi-scale fallback khi Fullscreen (do mất thanh tiêu đề/toolbar làm lệch nhẹ tỷ lệ 3-6%)
         is_ui_tmpl = Path(template_path).parent.name.lower() == "ui"
         eff_ref = self.reference_size if is_ui_tmpl else self.dragon_reference_size
-        if not best.found and self.auto_scale and eff_ref[0] > 200:
-            rw, rh = float(eff_ref[0]), float(eff_ref[1])
-            if self.is_adb_mode and rw > 600 and rh > 400:
-                rw -= 36.0
-                rh -= 36.0
-            sx = rect.width / max(200.0, rw)
-            sy = rect.height / max(200.0, rh)
-            if self.is_adb_mode or abs(sx - 1.0) > 0.02 or abs(sy - 1.0) > 0.02:
+        if not best.found and self.auto_scale:
+            if eff_ref[0] > 200 and eff_ref[1] > 200:
+                rw, rh = float(eff_ref[0]), float(eff_ref[1])
+                if self.is_adb_mode and rw > 600 and rh > 400:
+                    rw -= 36.0
+                    rh -= 36.0
+                sx = rect.width / max(200.0, rw)
+                sy = rect.height / max(200.0, rh)
+                s_avg = (sx + sy) / 2.0
+                mults = (0.97, 1.03, 0.94, 1.06, 0.85, 1.15, 0.80, 1.25)
+            else:
+                # Khi chưa có cỡ gốc (dragon_reference_window_size = [0, 0]) -> tự thử dải tỷ lệ 0.75..1.30!
+                s_avg = 1.0
+                mults = (0.80, 1.25, 0.90, 1.10, 0.75, 1.30)
+            if True:
                 base_img = self._load_template(template_path, target_rect=None)
                 if base_img is not None:
                     bh, bw = base_img.shape[:2]
-                    s_avg = (sx + sy) / 2.0
-                    for mult in (0.97, 1.03, 0.94, 1.06, 0.90, 1.10):
+                    for mult in mults:
                         nw = max(6, int(round(bw * s_avg * mult)))
                         nh = max(6, int(round(bh * s_avg * mult)))
                         interp = cv2.INTER_AREA if (s_avg * mult) < 1.0 else cv2.INTER_CUBIC
