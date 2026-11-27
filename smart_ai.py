@@ -61,8 +61,7 @@ class NaturalRuleParser:
         raw_low = (clause_raw or "").lower()
         cn = normalize_vn(clause_raw)
         has_ge = (">=" in raw_low) or any(k in cn for k in ("tu ", "tro len", "lon hon", "tren "))
-        # Kiểm tra trước nếu có số bất kỳ đi kèm điều kiện sao
-        m_any_num = re.search(r"(?<!\d)(\d{1,3})(?!\d)", raw_low if ">=" in raw_low else cn)
+        m_any_num = re.search(r"(\d+)", raw_low if ">=" in raw_low else cn)
         if m_any_num and has_ge:
             val = int(m_any_num.group(1))
             if ("tren " in cn or "lon hon" in cn) and "tro len" not in cn and ">=" not in raw_low and "tu " not in cn:
@@ -71,7 +70,7 @@ class NaturalRuleParser:
                 return ">=", val
             return "invalid", None
 
-        m_eq = re.search(r"(?:dung\s*|=\s*|\(\s*)?(?<!\d)(\d{1,3})(?!\d)\s*(?:sao|\*|★)", raw_low if "★" in raw_low else cn)
+        m_eq = re.search(r"(?:dung\s*|=\s*|\(\s*)?(\d+)\s*(?:sao|\*|★)", raw_low if "★" in raw_low else cn)
         if m_eq:
             val = int(m_eq.group(1))
             if 1 <= val <= 40:
@@ -106,17 +105,16 @@ class NaturalRuleParser:
         if not raw:
             return {"rules": result, "summary": [], "matched_count": 0}
 
-        # Tách câu theo dấu phẩy, chấm phẩy, xuống dòng, dấu chấm TRƯỚC khi bỏ dấu!
+        # Tách câu theo dấu phẩy, xuống dòng VÀ liên từ (còn lại/nhưng/riêng/trừ khi) TRƯỚC khi bỏ dấu
+        # để mỗi mệnh đề giữ nguyên ký hiệu '>=', '★' riêng của nó, không rò sang mệnh đề khác!
         clauses = [c.strip() for c in re.split(r"[,;\n.]+", raw) if c.strip()]
         expanded: List[str] = []
+        conj_pat = r"\b(?:còn lại|con lai|nhưng|nhung|riêng|rieng|trừ khi|tru khi)\b"
         for c in clauses:
-            c_norm = normalize_vn(c)
-            sub = re.split(r"\b(?:con lai|nhung|rieng|tru khi)\b", c_norm, flags=re.IGNORECASE)
+            sub = re.split(conj_pat, c, flags=re.IGNORECASE)
             for s in sub:
                 if s.strip():
-                    # Giữ lại ký hiệu '>=' hoặc '★' nếu có ở mệnh đề gốc
-                    prefix = ">= " if ">=" in c and ">=" not in s else ""
-                    expanded.append((prefix + s.strip()).strip())
+                    expanded.append(s.strip())
 
         last_action: Optional[str] = None
         for clause in expanded:

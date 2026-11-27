@@ -157,6 +157,7 @@ class DaoRongBot:
         self._mode_key = f"adb_{adb_serial}" if adb_serial else "win"
         self._cached_result_btns: Dict[str, Tuple[int, int]] = {}
         self._cached_result_frame = None
+        self._pre_identified = None
         self._learned_name_cache: List[Tuple[Any, str, str]] = []
         self._consecutive_failures = 0
         self.ocr_dict = OcrAdaptiveDictionary(self.base_dir / "ocr_learned_map.json")
@@ -813,14 +814,29 @@ class DaoRongBot:
     # Bước 2: Chọn 2 rồng bố mẹ CHUẨN XÁC (Kiểm chứng biến mất khỏi thanh dưới — 0% gỡ nhầm!)
     # ------------------------------------------------------------------
     def _count_empty_parent_slots(self, screen: np.ndarray, rect: WindowRect) -> Tuple[bool, bool]:
-        """Trả về (left_empty, right_empty) dùng vision.find_template (co giãn chuẩn mọi kích thước 992..1600px)."""
+        """Trả về (left_empty, right_empty), hỗ trợ cả co giãn theo khung lẫn giữ nguyên cỡ nội dung."""
         emp_p = self._ui("slot_parent_empty.png")
         if not emp_p.is_file():
             return True, True
-        roi_l = [0.16, 0.24, 0.34, 0.54] if self.vision.is_adb_mode else [0.15, 0.26, 0.33, 0.56]
-        roi_r = [0.40, 0.24, 0.58, 0.54] if self.vision.is_adb_mode else [0.39, 0.26, 0.57, 0.56]
+        roi_l = [0.14, 0.22, 0.36, 0.56]
+        roi_r = [0.38, 0.22, 0.60, 0.56]
         m_l = self.vision.find_template(emp_p, threshold=0.60, roi_rel=roi_l, screen_bgr=screen, rect=rect)
         m_r = self.vision.find_template(emp_p, threshold=0.60, roi_rel=roi_r, screen_bgr=screen, rect=rect)
+        if m_l.found and m_r.found:
+            return True, True
+        tpl = imread_unicode(emp_p)
+        if tpl is not None and tpl.size > 0:
+            crop_l, _, _ = self.vision.crop_roi(screen, rect, roi_l)
+            crop_r, _, _ = self.vision.crop_roi(screen, rect, roi_r)
+            for sc in (1.0, 992.0 / 1294.0):
+                tw, th = max(12, int(tpl.shape[1] * sc)), max(12, int(tpl.shape[0] * sc))
+                t_s = cv2.resize(tpl, (tw, th), interpolation=cv2.INTER_AREA)
+                if not m_l.found and crop_l.shape[0] >= th and crop_l.shape[1] >= tw:
+                    if float(cv2.matchTemplate(crop_l, t_s, cv2.TM_CCOEFF_NORMED).max()) >= 0.62:
+                        m_l.found = True
+                if not m_r.found and crop_r.shape[0] >= th and crop_r.shape[1] >= tw:
+                    if float(cv2.matchTemplate(crop_r, t_s, cv2.TM_CCOEFF_NORMED).max()) >= 0.62:
+                        m_r.found = True
         return m_l.found, m_r.found
 
     def _click_upper_slot(self, rect: WindowRect, slot_idx: int) -> None:
@@ -854,6 +870,46 @@ class DaoRongBot:
         cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
         return hist
 
+    def _verify_both_slots_bijection(
+        self, screen: np.ndarray, p1_path: Path, p2_path: Path
+    ) -> Tuple[bool, List[int]]:
+        """
+        Kiểm chứng 1-1 hai ô bố mẹ phía trên với đúng cặp (p1, p2):
+        - Nếu chưa có đủ cả 2 mẫu màu -> trả về (False, [1, 2]) để gỡ ra chọn chuẩn từ thanh dưới.
+        - Nếu 2 ô trên có hình dáng giống hệt nhau (cùng 1 con A ở cả 2 ô!) -> gỡ ô 2!
+        - Nếu đã có đủ (h1, h2) -> kiểm tra ghép cặp 1-1 màu sắc từng ô.
+        """
+        h1 = self._parent_slot_hists.get(p1_path.name)
+        h2 = self._parent_slot_hists.get(p2_path.name)
+        if h1 is None or h2 is None:
+            return False, [1, 2]
+        sc1 = self._slot_crop_upper(screen, 1, self.vision.is_adb_mode)
+        sc2 = self._slot_crop_upper(screen, 2, self.vision.is_adb_mode)
+        hu1 = self._dragon_hsv_hist(sc1)
+        hu2 = self._dragon_hsv_hist(sc2)
+        if hu1 is None or hu2 is None:
+            return False, [1, 2]
+
+        # Chống trùng lặp 2 ô cùng 1 con A (kể cả khi A & B gần màu nhau!)
+        if p1_path.name != p2_path.name and sc1.shape == sc2.shape:
+            # Cắt phần lõi bên trong (bỏ viền lá ngoài cùng) để so hình dáng rồng ở 2 ô
+            sh, sw = sc1.shape[:2]
+            c1 = sc1[int(sh * 0.18):int(sh * 0.85), int(sw * 0.18):int(sw * 0.82)]
+            c2 = sc2[int(sh * 0.18):int(sh * 0.85), int(sw * 0.18):int(sw * 0.82)]
+            if compute_frame_similarity(c1, c2) >= 0.82:
+                return False, [2]
+
+        s11 = float(cv2.compareHist(hu1, h1, cv2.HISTCMP_CORREL))
+        s12 = float(cv2.compareHist(hu1, h2, cv2.HISTCMP_CORREL))
+        s21 = float(cv2.compareHist(hu2, h1, cv2.HISTCMP_CORREL))
+        s22 = float(cv2.compareHist(hu2, h2, cv2.HISTCMP_CORREL))
+
+        if min(s11, s22) >= min(s12, s21):
+            bad = ([1] if s11 < 0.74 else []) + ([2] if s22 < 0.74 else [])
+        else:
+            bad = ([1] if s12 < 0.74 else []) + ([2] if s21 < 0.74 else [])
+        return (len(bad) == 0), bad
+
     def _select_parents_dual_fast(self, p1_path: Path, p2_path: Path) -> bool:
         """
         Chọn 2 rồng bố mẹ CHUẨN XÁC (Winner-Takes-All + Patch-Gone + HSV Color Guard):
@@ -876,23 +932,13 @@ class DaoRongBot:
         l_emp0, r_emp0 = self._count_empty_parent_slots(scr0, rect0)
         slots_needed = int(l_emp0) + int(r_emp0)
         if slots_needed == 0:
-            # Nếu đã có bảng màu HSV của 2 bố mẹ -> kiểm chứng lại cả 2 ô trên trước khi bấm Lai!
-            known_vals = [self._parent_slot_hists.get(p1_path.name), self._parent_slot_hists.get(p2_path.name)]
-            known_vals = [h for h in known_vals if h is not None]
-            removed_any = False
-            if known_vals:
-                for s_idx in (1, 2):
-                    sc_u = self._slot_crop_upper(scr0, s_idx, self.vision.is_adb_mode)
-                    hu = self._dragon_hsv_hist(sc_u)
-                    if hu is not None:
-                        best_sim = max(float(cv2.compareHist(hu, kh, cv2.HISTCMP_CORREL)) for kh in known_vals)
-                        if best_sim < 0.74:
-                            self.log(f"⚠️ [KIỂM CHỨNG] Ô bố mẹ {s_idx} đang giữ nhầm rồng lạ (khớp={best_sim:.2f}) -> Tự gỡ ra chọn lại!")
-                            self._click_upper_slot(rect0, s_idx)
-                            removed_any = True
-            if not removed_any:
-                self.log("⚡ [CHỌN RỒNG] Đã có đủ 2 rồng bố mẹ trên ô -> Bấm Lai Rồng ngay!")
+            ok_pair, bad_slots = self._verify_both_slots_bijection(scr0, p1_path, p2_path)
+            if ok_pair:
+                self.log("⚡ [CHỌN RỒNG] Đã xác minh đúng cả 2 bố mẹ trên ô -> Bấm Lai Rồng ngay!")
                 return True
+            self.log(f"⚠️ [KIỂM CHỨNG] Cần xác minh lại ô bố mẹ {bad_slots} -> Gỡ ra chọn chuẩn từ thanh dưới!")
+            for s_idx in bad_slots:
+                self._click_upper_slot(rect0, s_idx)
             scr0, rect0 = self.vision.capture_window()
             l_emp0, r_emp0 = self._count_empty_parent_slots(scr0, rect0)
             slots_needed = int(l_emp0) + int(r_emp0)
@@ -925,7 +971,7 @@ class DaoRongBot:
                         best_seen[label] = res.score
                     if res.found:
                         rel_x = (res.x - cur_rct.left) / max(1, cur_rct.width)
-                        min_rx, max_rx = (0.155, 0.565) if self.vision.is_adb_mode else (0.150, 0.565)
+                        min_rx, max_rx = (0.150, 0.605)
                         if min_rx <= rel_x <= max_rx:
                             candidates.append((res.score, label, pp, res))
 
@@ -976,7 +1022,12 @@ class DaoRongBot:
 
         prev_scr, prev_rect = _try_pick_visible(scr0, rect0)
         if picked_count >= 2 or not need:
-            return True
+            ok_pair, bad_slots = self._verify_both_slots_bijection(prev_scr, p1_path, p2_path)
+            if ok_pair or (self._parent_slot_hists.get(p1_path.name) is None or self._parent_slot_hists.get(p2_path.name) is None):
+                return True
+            for s_idx in bad_slots:
+                self._click_upper_slot(prev_rect, s_idx)
+            return False
 
         pref_dir = self.dir_memory.preferred_direction(p1_path.name, p2_path.name)
         if pref_dir == "left":
@@ -1117,6 +1168,11 @@ class DaoRongBot:
         # Quét đúng dải nút kết quả thay vì quét toàn màn hình -> nhanh gấp ~12 lần!
         btns_band_roi = self._drag_cfg("result_buttons_roi", [0.16, 0.42, 0.64, 0.72])
 
+        self._pre_identified = None
+        name_roi = self._drag_cfg("result_name_roi", [0.57, 0.285, 0.78, 0.348])
+        text_rules = self.config.get("dragon_text_rules", {})
+        has_rules = any(bool(text_rules.get(k)) for k in ("bless", "keep", "sell"))
+
         while time.monotonic() < deadline:
             if not self.wait_if_paused():
                 return BotState.OPEN_BREED
@@ -1124,6 +1180,18 @@ class DaoRongBot:
             screen, rect = self.vision.capture_window()
             if self._check_bag_full(screen, rect):
                 return BotState.EXIT_BREED_TO_DUST
+
+            if self._pre_identified is None and has_rules and self.name_cache.count > 0:
+                nc, _, _ = self.vision.crop_roi(screen, rect, name_roi)
+                if PersistentNameCache._has_text_signal(nc):
+                    res_key = f"{self._mode_key}_{rect.width}x{rect.height}"
+                    mem_hit = self.name_cache.match(nc, res_key, threshold=0.89)
+                    if mem_hit is not None:
+                        c_name, c_rar, c_stars, c_sc = mem_hit
+                        synth_txt = f"{c_name} ({c_stars} sao)" if c_stars else c_name
+                        tm_mem = self.text_matcher.match_text_against_rules(synth_txt, text_rules)
+                        if tm_mem.found:
+                            self._pre_identified = (tm_mem.category, c_name, c_rar, c_stars, c_sc)
 
             found_btns: Dict[str, Tuple[int, int]] = {}
             for bname in result_buttons:
@@ -1176,8 +1244,16 @@ class DaoRongBot:
         has_rules = any(bool(text_rules.get(k)) for k in ("bless", "keep", "sell"))
         name_crop = None
 
+        if getattr(self, "_pre_identified", None) is not None:
+            action, c_name, c_rar, c_stars, c_sc = self._pre_identified
+            self._pre_identified = None
+            self._last_identified = (c_name, c_rar, c_stars)
+            act_vn = {"bless": "Chúc phúc & Cất", "keep": "Cất túi", "sell": "Bán ngay"}[action]
+            st_str = f" ({c_stars}★)" if c_stars else ""
+            self.log(f"⚡ Lai ra: {c_name}{st_str} [{c_rar}] → {act_vn} (nhớ trước 0ms)")
+
         # ƯU TIÊN 1 (SIÊU TỐC < 1.5ms): AI Bộ Nhớ Tự Học Vĩnh Viễn — KIỂM TRA TRƯỚC TIÊN, KHÔNG CHỜ QUÉT THƯ MỤC!
-        if has_rules and self.name_cache.count > 0:
+        if action is None and has_rules and self.name_cache.count > 0:
             name_crop, _, _ = self.vision.crop_roi(screen, rect, name_roi)
             mem_hit = self.name_cache.match(name_crop, res_key, threshold=0.89)
             if mem_hit is not None:
@@ -1378,6 +1454,9 @@ class DaoRongBot:
         self.input.sleep_interruptible(0.12 * self._spd, self.should_stop)
         if self._check_bag_full():
             return BotState.EXIT_BREED_TO_DUST
+        if action == "keep" and not keep_succeeded and not self.should_stop():
+            self.log("[PHỤC HỒI] Chưa bấm được nút Cất rồng -> Giữ ở màn kết quả để thử lại.")
+            return BotState.WAIT_BREED_RESULT
 
         return BotState.SELECT_PARENTS
 
