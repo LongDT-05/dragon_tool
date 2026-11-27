@@ -159,6 +159,8 @@ class DaoRongBot:
         self._cached_result_frame = None
         self._pre_identified = None
         self._breed_counted_for_cycle = False
+        self._pair_stats_recorded_for_cycle = False
+        self._pair_stats_recorded_for_cycle = False
         self._keep_retry_count = 0
         self._session_dust_sprites: Dict[Tuple[str, int], List[np.ndarray]] = {}
         self._learned_name_cache: List[Tuple[Any, str, str]] = []
@@ -949,9 +951,42 @@ class DaoRongBot:
                 self.log("⚠️ [KIỂM CHỨNG] Gỡ ô bố mẹ không làm ô trống đi -> Dừng bấm Lai để tránh lai sai cặp!")
                 return False
 
-        need: List[Tuple[str, Path]] = [("Rồng 1", p1_path), ("Rồng 2", p2_path)]
+        # Theo dõi danh tính từng ô đã xác minh: chỉ bấm Lai khi ĐỦ CẢ 2 ô được xác minh thuộc {p1, p2}!
+        verified_slots: Dict[int, str] = {}
+        if slots_needed == 0:
+            # Đã qua _verify_both_slots_bijection == True ở trên
+            verified_slots = {1: p1_path.name, 2: p2_path.name}
+        elif slots_needed == 1:
+            # Còn 1 ô đã có sẵn rồng từ trước -> chỉ giữ nếu xác minh được đúng bằng bảng màu, nếu không gỡ nốt!
+            occupied_idx = 2 if l_emp0 else 1
+            h1 = self._parent_slot_hists.get(p1_path.name)
+            h2 = self._parent_slot_hists.get(p2_path.name)
+            hu = self._dragon_hsv_hist(self._slot_crop_upper(scr0, occupied_idx, self.vision.is_adb_mode))
+            matched_pre = None
+            if hu is not None:
+                s1 = float(cv2.compareHist(hu, h1, cv2.HISTCMP_CORREL)) if h1 is not None else 0.0
+                s2 = float(cv2.compareHist(hu, h2, cv2.HISTCMP_CORREL)) if h2 is not None else 0.0
+                if max(s1, s2) >= 0.74:
+                    matched_pre = p1_path.name if s1 >= s2 else p2_path.name
+            if matched_pre is not None:
+                verified_slots[occupied_idx] = matched_pre
+            else:
+                self.log(f"⚠️ [KIỂM CHỨNG] Ô {occupied_idx} đang có rồng chưa xác minh -> Bấm gỡ ra để chọn lại đủ cặp!")
+                self._click_upper_slot(rect0, occupied_idx)
+                scr0, rect0 = self.vision.capture_window()
+                l_emp0, r_emp0 = self._count_empty_parent_slots(scr0, rect0)
+                slots_needed = int(l_emp0) + int(r_emp0)
+                if slots_needed < 2:
+                    self.log("⚠️ [KIỂM CHỨNG] Không gỡ trống được ô còn lại -> Dừng để tránh lai sai cặp!")
+                    return False
+
+        need: List[Tuple[str, Path]] = []
+        if p1_path.name not in verified_slots.values():
+            need.append(("Rồng 1", p1_path))
+        if p2_path.name not in verified_slots.values():
+            need.append(("Rồng 2", p2_path))
         best_seen: Dict[str, float] = {"Rồng 1": 0.0, "Rồng 2": 0.0}
-        picked_count = 2 - slots_needed
+        picked_count = len(verified_slots)
 
         def _card_patch(scr: np.ndarray, rct: WindowRect, cx: int, cy: int) -> np.ndarray:
             lx, ly = cx - rct.left, cy - rct.top
@@ -1019,15 +1054,16 @@ class DaoRongBot:
                             self._parent_slot_hists[pp.name] = h_cur
 
                     if not wrong_by_color:
+                        verified_slots[entered_slot] = pp.name
                         need = [(lb, p) for lb, p in need if lb != label]
-                        picked_count = 2 - (int(l_after) + int(r_after))
+                        picked_count = len(verified_slots)
                 elif not patch_changed:
                     # Click không ăn -> thử lại 1 nhịp
                     break
             return cur_scr, cur_rct
 
         def _confirm_final_slots(cur_s: np.ndarray, cur_r: WindowRect) -> bool:
-            if need:
+            if need or set(verified_slots.values()) != {p1_path.name, p2_path.name}:
                 return False
             ok_pair, bad_slots = self._verify_both_slots_bijection(cur_s, p1_path, p2_path)
             if ok_pair:
@@ -1035,6 +1071,7 @@ class DaoRongBot:
             if self._parent_slot_hists.get(p1_path.name) is not None and self._parent_slot_hists.get(p2_path.name) is not None:
                 for s_idx in bad_slots:
                     self._click_upper_slot(cur_r, s_idx)
+                    verified_slots.pop(s_idx, None)
                 return False
             return True
 
@@ -1270,8 +1307,21 @@ class DaoRongBot:
             self._pre_identified = None
             nc_now, _, _ = self.vision.crop_roi(screen, rect, name_roi)
             # Chỉ dùng kết quả nhận diện sớm nếu vùng tên trên khung hiện tại KHÔNG đổi so với khung sớm!
+            star_ok = True
+            if nc_now.shape == nc_pre.shape and nc_now.shape[1] >= 30:
+                sw_cut = max(12, int(nc_now.shape[1] * 0.60))
+                s_sim = float(cv2.matchTemplate(nc_pre[:, sw_cut:], nc_now[:, sw_cut:], cv2.TM_CCOEFF_NORMED)[0, 0])
+                if s_sim < 0.96:
+                    star_ok = False
+            if star_ok and self.text_matcher.is_available:
+                from ocr_engine import extract_stars as _ext_stars
+                ocr_now = self.text_matcher.read_name_crop(nc_now)
+                st_now = _ext_stars(ocr_now or "")
+                if st_now is not None and c_stars is not None and st_now != c_stars:
+                    star_ok = False
             if (
-                PersistentNameCache._has_text_signal(nc_now)
+                star_ok
+                and PersistentNameCache._has_text_signal(nc_now)
                 and nc_now.shape == nc_pre.shape
                 and float(cv2.matchTemplate(nc_pre, nc_now, cv2.TM_CCOEFF_NORMED)[0, 0]) >= 0.94
             ):
@@ -1451,15 +1501,18 @@ class DaoRongBot:
                 except Exception:
                     pass
                 self.log_tech(f"[SỔ HÓA BỤI] +1 ({id_rarity}, {id_stars}★) -> tổng chờ bụi: {sum(self._session_dust_ledger.values())}")
-        try:
-            self.pair_stats.record_breed(
-                self.config.get("selected_parent_1", ""),
-                self.config.get("selected_parent_2", ""),
-                id_rarity,
-                action,
-            )
-        except Exception:
-            pass
+        action_ok = keep_succeeded or (action in ("sell", "bless"))
+        if action_ok and not getattr(self, "_pair_stats_recorded_for_cycle", False):
+            self._pair_stats_recorded_for_cycle = True
+            try:
+                self.pair_stats.record_breed(
+                    self.config.get("selected_parent_1", ""),
+                    self.config.get("selected_parent_2", ""),
+                    id_rarity,
+                    action,
+                )
+            except Exception:
+                pass
         if id_rarity in ("Hiếm", "Cực hiếm", "Event") or action == "bless":
             if id_rarity == "Hiếm":
                 self.stats.rare_hits += 1
@@ -1863,6 +1916,19 @@ class DaoRongBot:
                             self.log_tech(f"[SỔ HÓA BỤI] Bỏ qua rồng cũ [{cand.name} {c_star}★] (không nằm trong sổ vừa lai).")
                             skipped_pts.append((cand.x, cand.y))
                             continue
+                        spr_list = self._session_dust_sprites.get(lkey, [])
+                        if spr_list:
+                            sx_d, sy_d = rect.width / 1330.0, rect.height / 761.0
+                            cl = max(0, (cand.x - rect.left) - int(28 * sx_d))
+                            ct = max(0, (cand.y - rect.top) - int(18 * sy_d))
+                            c_box = screen[ct:min(rect.height, ct + int(115 * sy_d)), cl:min(rect.width, cl + int(145 * sx_d))]
+                            c_hist = self._dragon_hsv_hist(c_box)
+                            if c_hist is not None:
+                                best_sp = max(float(cv2.compareHist(c_hist, sh, cv2.HISTCMP_CORREL)) for sh in spr_list)
+                                if best_sp < 0.72:
+                                    self.log(f"🛡️ [SỔ HÓA BỤI] Bỏ qua thẻ trùng {cand.name} {c_star}★ nhưng khác màu rồng vừa lai (khớp={best_sp:.2f})!")
+                                    skipped_pts.append((cand.x, cand.y))
+                                    continue
 
                 chosen = cand
                 chosen_star = c_star
@@ -1886,6 +1952,19 @@ class DaoRongBot:
                     continue
                 self.log(f"[HÓA BỤI] {col_side} ({chosen.score:.2f}) -> Click giữa rồng ({click_x}, {click_y}).")
                 self.input.click(click_x, click_y, post_delay=0.45 * self._spd, stop_check=self.should_stop)
+
+                # Chụp khung hình MỚI sau khi click chọn thẻ để xác minh lại trước khi bấm Hóa Bụi -> Xác nhận!
+                post_scr, post_rect = self.vision.capture_window()
+                if self._is_card_locked(post_scr, post_rect, chosen.x, chosen.y, chosen.w, chosen.h) or self._is_card_protected(post_scr, post_rect, chosen.x, chosen.y, chosen.w, chosen.h):
+                    self.log("🛡️ [XÁC MINH SAU CLICK] Thẻ đang chọn có dấu khóa/Cấm Bụi trên khung mới -> Dừng bấm Hóa Bụi!")
+                    skipped_pts.append((chosen.x, chosen.y))
+                    continue
+                if dust_max_star > 0:
+                    post_star = self._read_card_star(post_scr, post_rect, chosen.x, chosen.y, chosen.w, chosen.h)
+                    if post_star is None or post_star > dust_max_star:
+                        self.log(f"🛡️ [XÁC MINH SAU CLICK] Thẻ thay đổi sao ({post_star}★) trên khung mới -> Bỏ qua an toàn!")
+                        skipped_pts.append((chosen.x, chosen.y))
+                        continue
 
                 res_dust = self._click_ui("btn_dust.png", timeout=3.0, retries=1, post_delay=0.4 * self._spd)
                 if not (res_dust and res_dust.found):
