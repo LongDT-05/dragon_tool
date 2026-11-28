@@ -15,10 +15,11 @@ import struct
 import queue
 import subprocess
 import threading
+import time
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, Tuple, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -222,6 +223,11 @@ class AdbController:
                 proc.kill()
             except Exception:
                 pass
+
+    def close_all_shells(self) -> None:
+        """Đóng sạch toàn bộ phiên adb shell đang mở để không sót tiến trình nền."""
+        for serial in list(self._shell_pipes.keys()):
+            self._close_shell_pipe(serial)
 
     def _run_fast_shell_cmd(self, serial: str, cmd: str, timeout: float = 3.5) -> bool:
         """Gửi lệnh qua phiên adb shell mở sẵn (bỏ thời gian khởi tạo adb.exe trên Windows). Tự động lùi về _run nếu lỗi."""

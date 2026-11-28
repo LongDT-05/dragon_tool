@@ -13,6 +13,7 @@ Nâng cấp v3.0:
 
 from __future__ import annotations
 
+import gc
 import threading
 import time
 from dataclasses import dataclass, field
@@ -163,15 +164,10 @@ class DaoRongBot:
         self._breed_counted_for_cycle = False
         self._pair_stats_recorded_for_cycle = False
         self._drop_recorded_for_cycle = False
-        self._pair_stats_recorded_for_cycle = False
-        self._drop_recorded_for_cycle = False
         self._keep_retry_count = 0
-        self._session_dust_sprites: Dict[Tuple[str, int], List[np.ndarray]] = {}
-        self._learned_name_cache: List[Tuple[Any, str, str]] = []
         self._consecutive_failures = 0
         self.ocr_dict = OcrAdaptiveDictionary(self.base_dir / "ocr_learned_map.json")
         self.rare_saver = RareMomentSaver(self.base_dir / "lich_su_rong_quy")
-        self.dataset_collector = TrainingDatasetCollector(self.base_dir / "ai_dataset")
         self._next_break_ts = 0.0
         # Sổ Tay Rồng Vừa Lai: lưu {(Độ hiếm, Số sao): số con vừa cất chờ hóa bụi} -> 0% hóa bụi nhầm rồng cũ!
         self._session_dust_ledger: Dict[Tuple[str, int], int] = {}
@@ -181,8 +177,6 @@ class DaoRongBot:
         self._parent_slot_hists: Dict[str, np.ndarray] = {}
         self.yolo = shared_yolo if shared_yolo is not None else YoloLevel2Vision(self.base_dir / "models")
         self.notifier = AlertNotifier(
-            telegram_token=config.get("telegram_token", ""),
-            telegram_chat_id=config.get("telegram_chat_id", ""),
             discord_webhook=config.get("discord_webhook", ""),
             enabled=bool(config.get("enable_remote_notify", False)),
         )
@@ -229,7 +223,6 @@ class DaoRongBot:
         self._wd_last_frame = None
         self._wd_last_change_ts = time.monotonic()
         self.vision.clear_cache()
-        self._learned_name_cache.clear()
         self.text_matcher.warmup_async()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
@@ -693,11 +686,11 @@ class DaoRongBot:
         return False
 
     def _is_on_dust_island(self, screen: np.ndarray, rect: WindowRect) -> bool:
+        altar_p = self._ui("btn_altar_center.png")
+        if altar_p.is_file() and self.vision.find_template(altar_p, threshold=0.68, screen_bgr=screen, rect=rect).found:
+            return True
         if self.yolo.ready and self.yolo.find_best(screen, "altar", conf_thr=0.48) is not None:
             return True
-        altar_p = self._ui("btn_altar_center.png")
-        if altar_p.is_file():
-            return self.vision.find_template(altar_p, threshold=0.68, screen_bgr=screen, rect=rect).found
         return False
 
     def _scan_islands_for_egg(self) -> bool:
@@ -719,9 +712,8 @@ class DaoRongBot:
                 scr, rect = self.vision.capture_window()
                 if self._is_breed_ui_open(scr, rect):
                     return True
-                y_egg = self.yolo.find_best(scr, "egg", conf_thr=0.52) if self.yolo.ready else None
                 m_egg = self.vision.find_template(egg_p, threshold=0.68, screen_bgr=scr, rect=rect)
-                if y_egg is not None or m_egg.found:
+                if m_egg.found or (self.yolo.ready and self.yolo.find_best(scr, "egg", conf_thr=0.52) is not None):
                     self.log(f"🏝️ Đã tìm thấy Đảo Trứng sau khi chuyển đảo {label}!")
                     return True
                 m_arr = self.vision.find_template(arr_p, threshold=nav_thr, screen_bgr=scr, rect=rect)
@@ -731,7 +723,7 @@ class DaoRongBot:
                 self.input.click(m_arr.x, m_arr.y, post_delay=0.70 * self._spd, stop_check=self.should_stop)
                 # Kiểm tra ngay sau khi chuyển đảo
                 scr2, rect2 = self.vision.capture_window()
-                if (self.yolo.ready and self.yolo.find_best(scr2, "egg", conf_thr=0.52) is not None) or self.vision.find_template(egg_p, threshold=0.68, screen_bgr=scr2, rect=rect2).found:
+                if self.vision.find_template(egg_p, threshold=0.68, screen_bgr=scr2, rect=rect2).found or (self.yolo.ready and self.yolo.find_best(scr2, "egg", conf_thr=0.52) is not None):
                     self.log("🏝️ Đã về đúng Đảo Trứng!")
                     return True
         return False
@@ -775,18 +767,18 @@ class DaoRongBot:
                 return BotState.SELECT_PARENTS
 
             clicked_pos = None
-            # AI Cấp 2 (YOLOv8-nano): nhìn xuyên rồng che tìm chuẩn tâm Trứng trên Đảo Trứng!
-            if self.yolo.ready:
-                y_egg = self.yolo.find_best(screen, "egg", conf_thr=0.52)
-                if y_egg is not None:
-                    clicked_pos = (rect.left + y_egg.cx, rect.top + y_egg.cy)
-                    self.config.setdefault("pins", {})["egg_rel"] = list(rect.abs_to_rel(*clicked_pos))
-                    self.log_tech(f"[AI CẤP 2] Phát hiện Trứng ({y_egg.conf:.2f}) tại {clicked_pos}.")
-            if clicked_pos is None and egg_path.is_file():
+            # Ưu tiên OpenCV trước để tiết kiệm ~150MB RAM; chỉ nạp AI Cấp 2 (YOLO) dự phòng khi rồng bay che mất Trứng!
+            if egg_path.is_file():
                 res = self.vision.find_template(egg_path, threshold=0.68, screen_bgr=screen, rect=rect)
                 if res.found:
                     clicked_pos = (res.x, res.y)
                     self.config.setdefault("pins", {})["egg_rel"] = list(rect.abs_to_rel(res.x, res.y))
+            if clicked_pos is None and self.yolo.ready:
+                y_egg = self.yolo.find_best(screen, "egg", conf_thr=0.52)
+                if y_egg is not None:
+                    clicked_pos = (rect.left + y_egg.cx, rect.top + y_egg.cy)
+                    self.config.setdefault("pins", {})["egg_rel"] = list(rect.abs_to_rel(*clicked_pos))
+                    self.log_tech(f"[AI CẤP 2 - DỰ PHÒNG] Phát hiện Trứng xuyên rồng che ({y_egg.conf:.2f}) tại {clicked_pos}.")
 
             if clicked_pos is None:
                 # Nếu thử ghim 2 lần rồi mà chưa mở được bảng Lai -> có thể đang đứng sai đảo -> tự quét chuyển đảo!

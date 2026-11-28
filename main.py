@@ -1770,7 +1770,15 @@ class DaoRongStudioV10(ctk.CTk):
         threading.Thread(target=_run, daemon=True).start()
 
     def _on_close(self) -> None:
+        try:
+            self._save_all_settings(silent=True)
+        except Exception:
+            pass
         self.on_stop_all()
+        try:
+            self.adb_ctrl.close_all_shells()
+        except Exception:
+            pass
         self.destroy()
 
 
