@@ -52,7 +52,7 @@ jobs:
         shell: pwsh
         run: |
           if (Test-Path build_obf) { Remove-Item -Recurse -Force build_obf }
-          pyarmor gen -O build_obf main.py bot_engine.py vision.py actions.py capture_tool.py ocr_engine.py updater.py adb_controller.py smart_ai.py notifier.py yolo_vision.py
+          pyarmor gen -O build_obf main.py bot_engine.py vision.py actions.py capture_tool.py ocr_engine.py updater.py adb_controller.py smart_ai.py notifier.py yolo_vision.py carousel.py parent_cards.py
           if ($LASTEXITCODE -eq 0) {
             Copy-Item app_icon.ico build_obf\app_icon.ico -Force
             Push-Location build_obf

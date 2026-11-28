@@ -530,6 +530,29 @@ class DragonTextMatcher:
         except Exception:
             return ""
 
+    def read_parent_stars(self, digits_bgr: np.ndarray) -> Optional[int]:
+        """Read the two small white digits from a cropped lower parent card."""
+        if digits_bgr.size == 0 or not self._ensure_ocr():
+            return None
+        hsv = cv2.cvtColor(digits_bgr, cv2.COLOR_BGR2HSV)
+        white = cv2.inRange(hsv, (0, 0, 160), (180, 105, 255))
+        if cv2.countNonZero(white) < 8:
+            return None
+        x, y, w, h = cv2.boundingRect(white)
+        if w < 3 or h < 5:
+            return None
+        digits = cv2.resize(255 - white[y:y + h, x:x + w], None, fx=4, fy=4, interpolation=cv2.INTER_NEAREST)
+        digits = cv2.copyMakeBorder(digits, 6, 6, 8, 8, cv2.BORDER_CONSTANT, value=255)
+        try:
+            rows, _ = self._ocr(cv2.cvtColor(digits, cv2.COLOR_GRAY2BGR), use_det=False, use_cls=False)
+            if rows:
+                text, confidence = rows[0][:2]
+                if confidence >= 0.80 and re.fullmatch(r"[1-9][0-9]?", text):
+                    return int(text)
+        except Exception:
+            pass
+        return None
+
     def identify_from_catalog(self, ocr_raw: str) -> Tuple[str, str, float]:
         """So khớp đóng chuỗi OCR vào danh mục 63 loài rồng chuẩn của Đảo Rồng."""
         if not ocr_raw or not self.catalog:

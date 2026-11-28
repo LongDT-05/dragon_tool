@@ -23,9 +23,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from actions import InputController
+from carousel import CarouselEdgeTracker, ParentCarousel
 from ocr_engine import DragonTextMatcher, extract_stars, load_dragon_catalog, normalize_vn, parse_rule_string
 import random
 from notifier import AlertNotifier
+from parent_cards import (
+    ParentCard, find_parent_cards, has_parent_star, has_visible_parent_star,
+    parent_star_digits, parent_tile_was_emptied, terminal_gap,
+)
 from smart_ai import (
     AnchorAutoCalibrator,
     OcrAdaptiveDictionary,
@@ -185,7 +190,7 @@ class DaoRongBot:
         self._wd_last_frame = None
         self._wd_last_change_ts = 0.0
         self.dir_memory = PairDirectionMemory()
-        self._parent_slot_hists: Dict[str, np.ndarray] = {}
+        self._verified_parent_slots: Dict[int, np.ndarray] = {}
         self.yolo = shared_yolo if shared_yolo is not None else YoloLevel2Vision(self.base_dir / "models")
         self.notifier = AlertNotifier(
             telegram_token=config.get("telegram_token", ""),
@@ -841,7 +846,7 @@ class DaoRongBot:
         return BotState.OPEN_BREED
 
     # ------------------------------------------------------------------
-    # Bước 2: Chọn 2 rồng bố mẹ CHUẨN XÁC (Kiểm chứng biến mất khỏi thanh dưới — 0% gỡ nhầm!)
+    # Bước 2: Chọn hai rồng bố mẹ và kiểm chứng từng thẻ sau khi bấm.
     # ------------------------------------------------------------------
     def _count_empty_parent_slots(self, screen: np.ndarray, rect: WindowRect) -> Tuple[bool, bool]:
         """Trả về (left_empty, right_empty), hỗ trợ cả co giãn theo khung lẫn giữ nguyên cỡ nội dung."""
@@ -920,343 +925,296 @@ class DaoRongBot:
         _, channel_std = cv2.meanStdDev(normalized)
         return normalized if float(channel_std.max()) >= 3.0 else None
 
-    def _verify_both_slots_bijection(
-        self, screen: np.ndarray, p1_path: Path, p2_path: Path, *, recently_selected: bool = False
-    ) -> Tuple[bool, List[int]]:
-        """Kiểm chứng hai ô theo hình và bảng màu khi có đủ dữ liệu."""
-        sc1 = self._slot_crop_upper(screen, 1, self.vision.is_adb_mode)
-        sc2 = self._slot_crop_upper(screen, 2, self.vision.is_adb_mode)
-        shape1 = self._parent_slot_shape(sc1)
-        shape2 = self._parent_slot_shape(sc2)
-        has_shapes = shape1 is not None and shape2 is not None
-        if p1_path.name != p2_path.name and shape1 is not None and shape2 is not None:
-            shape_score = float(cv2.matchTemplate(shape1, shape2, cv2.TM_CCOEFF_NORMED)[0, 0])
-            if shape_score >= 0.92:
-                return False, [2]
-
-        h1 = self._parent_slot_hists.get(p1_path.name)
-        h2 = self._parent_slot_hists.get(p2_path.name)
-        if h1 is None or h2 is None:
-            return (True, []) if recently_selected and has_shapes else (False, [1, 2])
-        hu1 = self._dragon_hsv_hist(sc1)
-        hu2 = self._dragon_hsv_hist(sc2)
-        if hu1 is None or hu2 is None:
-            return (True, []) if recently_selected and has_shapes else (False, [1, 2])
-
-        s11 = float(cv2.compareHist(hu1, h1, cv2.HISTCMP_CORREL))
-        s12 = float(cv2.compareHist(hu1, h2, cv2.HISTCMP_CORREL))
-        s21 = float(cv2.compareHist(hu2, h1, cv2.HISTCMP_CORREL))
-        s22 = float(cv2.compareHist(hu2, h2, cv2.HISTCMP_CORREL))
-
-        if min(s11, s22) >= min(s12, s21):
-            bad = ([1] if s11 < 0.74 else []) + ([2] if s22 < 0.74 else [])
+    def _parent_carousel(self, screen: np.ndarray, rect: WindowRect) -> Optional[ParentCarousel]:
+        button = self.vision.find_template(
+            self._ui("btn_start_breed.png"), threshold=0.66, roi_rel=[0.38, 0.47, 0.59, 0.65],
+            screen_bgr=screen, rect=rect, compare_scales=True,
+        )
+        if button.found and button.w > 0:
+            scale = button.w / 144.0
+            x, y = button.x - rect.left, button.y - rect.top
+            viewport = (
+                round(x - 374 * scale), round(y + 61 * scale),
+                round(x + 73 * scale), round(y + 174 * scale),
+            )
         else:
-            bad = ([1] if s12 < 0.74 else []) + ([2] if s21 < 0.74 else [])
-        return (len(bad) == 0), bad
+            configured = self._drag_cfg("bottom_bar_roi", [0.15, 0.62, 0.61, 0.89])
+            x1, y1, x2, y2 = rect.roi_rel_to_local_px(configured)
+            if 3.55 <= (x2 - x1) / max(1, y2 - y1) <= 4.45:
+                viewport = (x1, y1, x2, y2)
+            elif self.vision.is_adb_mode and 1.72 <= rect.width / max(1, rect.height) <= 1.84:
+                # ADB frames contain the game alone, without window chrome.
+                viewport = rect.roi_rel_to_local_px([253 / 1280, 475 / 720, 700 / 1280, 588 / 720])
+            elif rect.found_window and "ldplayer" in rect.title.lower():
+                title_height = round(rect.height * 0.045)
+                game_height = rect.height - title_height
+                game_width = min(rect.width, round(game_height * 16 / 9))
+                viewport = (
+                    round(game_width * 253 / 1280), title_height + round(game_height * 475 / 720),
+                    round(game_width * 700 / 1280), title_height + round(game_height * 588 / 720),
+                )
+            else:
+                return None
+        left, top, right, bottom = viewport
+        if left < 0 or top < 0 or right > screen.shape[1] or bottom > screen.shape[0] or right - left < 96:
+            return None
+        return ParentCarousel(viewport, round((right - left) / 4))
+
+    def _parent_slot_matches(self, screen: np.ndarray, slot: int, previous: np.ndarray) -> bool:
+        current = self._parent_slot_shape(self._slot_crop_upper(screen, slot, self.vision.is_adb_mode))
+        if current is None or compute_frame_similarity(previous, current) < 0.83:
+            return False
+        sprite = (previous.max(axis=2) >= 105) | (current.max(axis=2) >= 105)
+        difference = cv2.absdiff(previous, current)
+        return float(difference[sprite].mean() if sprite.any() else difference.mean()) <= 18.0
+
+    def _selected_pair_still_present(self, screen: np.ndarray, rect: WindowRect) -> bool:
+        return (
+            len(self._verified_parent_slots) == 2
+            and self._count_empty_parent_slots(screen, rect) == (False, False)
+            and all(self._parent_slot_matches(screen, slot, shape) for slot, shape in self._verified_parent_slots.items())
+        )
 
     def _select_parents_dual_fast(self, p1_path: Path, p2_path: Path) -> bool:
-        """Quét thẻ bố mẹ và kiểm chứng ô đã nhận thẻ trước khi bấm Lai."""
+        """Select from complete cards and verify each source tile before authorizing breeding."""
+        self._verified_parent_slots.clear()
         if self.should_stop():
             return False
-        roi = self._drag_cfg("bottom_bar_roi", [0.15, 0.62, 0.61, 0.89])
-        rx1, ry1, rx2, ry2 = float(roi[0]), float(roi[1]), float(roi[2]), float(roi[3])
-        mid_y = (ry1 + ry2) / 2.0
-        raw_s = self._drag_cfg("bottom_drag_start", [0.48, mid_y])
-        raw_e = self._drag_cfg("bottom_drag_end", [0.24, mid_y])
-        def _clamp_pt(pt):
-            return [
-                max(rx1 + 0.01, min(rx2 - 0.01, float(pt[0]))),
-                max(ry1 + 0.01, min(ry2 - 0.01, float(pt[1]))),
-            ]
-        start_rel = _clamp_pt(raw_s)
-        end_rel = _clamp_pt(raw_e)
-        # Kiểm tra độ rộng vùng vuốt (chỉ chặn thao tác vuốt sau khi đã quét các thẻ đang hiện sẵn!)
-        can_swipe = True
-        if abs(start_rel[0] - end_rel[0]) < 0.05:
-            if (rx2 - rx1) >= 0.06:
-                pad = min(0.02, (rx2 - rx1) * 0.15)
-                start_rel[0] = rx2 - pad
-                end_rel[0] = rx1 + pad
-            else:
-                can_swipe = False
-        full_limit = max(1, int(self._drag_cfg("max_parent_scrolls", 24)))
-        drag_dur = 0.42 * self._spd
-        hold_end = 0.12
-        settle = 0.30 * self._spd
+        frame, rect = self.vision.capture_window()
+        carousel = self._parent_carousel(frame, rect)
+        if carousel is None:
+            self.log("[THANH RỒNG] Chưa xác định được vị trí thanh thẻ trên màn hình.")
+            return False
+
         is_adb = self.vision.is_adb_mode
-        thr = 0.79 if is_adb else max(0.82, self._conf("dragon", 0.75))
-        scale_options = {"compare_scales": True} if is_adb else {}
+        settle = 0.23 * self._spd
+        view_left, view_top, view_right, view_bottom = carousel.viewport
+        row = np.s_[view_top:view_bottom, view_left:view_right]
+        empty = self._count_empty_parent_slots(frame, rect)
 
-        def _capture_after_parent_click(
-            was_empty: Tuple[bool, bool], released_slots: Tuple[int, ...] = ()
-        ) -> Tuple[np.ndarray, WindowRect, Tuple[bool, bool]]:
-            # ADB đôi khi trả về khung cũ ngay sau khi input tap hoàn tất.
-            attempts = 3 if is_adb or not released_slots else 1
-            for attempt in range(attempts):
-                frame, rect = self.vision.capture_window()
-                empty = self._count_empty_parent_slots(frame, rect)
-                if released_slots:
-                    changed = all(empty[slot_idx - 1] for slot_idx in released_slots)
-                else:
-                    filled_slots = [
-                        idx for idx, (before, after) in enumerate(zip(was_empty, empty), 1)
-                        if before and not after
-                    ]
-                    changed = bool(filled_slots)
-                    if is_adb and changed:
-                        changed = any(
-                            self._parent_slot_shape(self._slot_crop_upper(frame, idx, is_adb)) is not None
-                            for idx in filled_slots
-                        )
-                if changed or self.should_stop() or attempt == attempts - 1:
+        # A pre-filled upper slot has no star label and no source tile tied to this run.
+        for slot, is_empty in enumerate(empty, 1):
+            if not is_empty:
+                self._click_upper_slot(rect, slot)
+        if empty != (True, True):
+            for _ in range(4):
+                if not self.input.sleep_interruptible(0.10, self.should_stop):
+                    return False
+                frame, current_rect = self.vision.capture_window()
+                if current_rect != rect:
+                    return False
+                if self._count_empty_parent_slots(frame, rect) == (True, True):
                     break
-                if not self.input.sleep_interruptible(0.10 if is_adb else 0.16 * self._spd, self.should_stop):
-                    break
-            return frame, rect, empty
-
-        scr0, rect0 = self.vision.capture_window()
-        l_emp0, r_emp0 = self._count_empty_parent_slots(scr0, rect0)
-        slots_needed = int(l_emp0) + int(r_emp0)
-        if slots_needed == 0:
-            ok_pair, bad_slots = self._verify_both_slots_bijection(scr0, p1_path, p2_path)
-            if ok_pair:
-                self.log("⚡ [CHỌN RỒNG] Đã xác minh đúng cả 2 bố mẹ trên ô -> Bấm Lai Rồng ngay!")
-                return True
-            self.log(f"⚠️ [KIỂM CHỨNG] Cần xác minh lại ô bố mẹ {bad_slots} -> Gỡ ra chọn chuẩn từ thanh dưới!")
-            for s_idx in bad_slots:
-                self._click_upper_slot(rect0, s_idx)
-            scr0, rect0, (l_emp0, r_emp0) = _capture_after_parent_click(
-                (l_emp0, r_emp0), tuple(bad_slots)
-            )
-            if self.should_stop():
-                return False
-            slots_needed = int(l_emp0) + int(r_emp0)
-            if slots_needed == 0:
-                self.log("⚠️ [KIỂM CHỨNG] Gỡ ô bố mẹ không làm ô trống đi -> Dừng bấm Lai để tránh lai sai cặp!")
-                return False
-
-        # Theo dõi danh tính từng ô đã xác minh: chỉ bấm Lai khi ĐỦ CẢ 2 ô được xác minh thuộc {p1, p2}!
-        verified_slots: Dict[int, str] = {}
-        if slots_needed == 1:
-            # Còn 1 ô đã có sẵn rồng từ trước -> chỉ giữ nếu xác minh được đúng bằng bảng màu, nếu không gỡ nốt!
-            occupied_idx = 2 if l_emp0 else 1
-            h1 = self._parent_slot_hists.get(p1_path.name)
-            h2 = self._parent_slot_hists.get(p2_path.name)
-            hu = self._dragon_hsv_hist(self._slot_crop_upper(scr0, occupied_idx, self.vision.is_adb_mode))
-            matched_pre = None
-            if hu is not None:
-                s1 = float(cv2.compareHist(hu, h1, cv2.HISTCMP_CORREL)) if h1 is not None else 0.0
-                s2 = float(cv2.compareHist(hu, h2, cv2.HISTCMP_CORREL)) if h2 is not None else 0.0
-                if max(s1, s2) >= 0.74:
-                    matched_pre = p1_path.name if s1 >= s2 else p2_path.name
-            if matched_pre is not None:
-                verified_slots[occupied_idx] = matched_pre
             else:
-                self.log(f"⚠️ [KIỂM CHỨNG] Ô {occupied_idx} đang có rồng chưa xác minh -> Bấm gỡ ra để chọn lại đủ cặp!")
-                self._click_upper_slot(rect0, occupied_idx)
-                scr0, rect0, (l_emp0, r_emp0) = _capture_after_parent_click(
-                    (l_emp0, r_emp0), (occupied_idx,)
-                )
-                if self.should_stop():
-                    return False
-                slots_needed = int(l_emp0) + int(r_emp0)
-                if slots_needed < 2:
-                    self.log("⚠️ [KIỂM CHỨNG] Không gỡ trống được ô còn lại -> Dừng để tránh lai sai cặp!")
-                    return False
-
-        need: List[Tuple[str, Path]] = []
-        if p1_path.name not in verified_slots.values():
-            need.append(("Rồng 1", p1_path))
-        if p2_path.name not in verified_slots.values():
-            need.append(("Rồng 2", p2_path))
-        best_seen: Dict[str, float] = {"Rồng 1": 0.0, "Rồng 2": 0.0}
-        picked_count = len(verified_slots)
-
-        def _card_patch(scr: np.ndarray, rct: WindowRect, cx: int, cy: int) -> np.ndarray:
-            lx, ly = cx - rct.left, cy - rct.top
-            pw, ph = max(24, int(rct.width * 0.04)), max(24, int(rct.height * 0.06))
-            y1, y2 = max(0, ly - ph), min(scr.shape[0], ly + ph)
-            x1, x2 = max(0, lx - pw), min(scr.shape[1], lx + pw)
-            return scr[y1:y2, x1:x2].copy()
-
-        def _try_pick_visible(scr: np.ndarray, rct: WindowRect) -> Optional[Tuple[np.ndarray, WindowRect]]:
-            nonlocal need, picked_count
-            cur_scr, cur_rct = scr, rct
-            # Lặp tối đa 2 lần nếu cả 2 rồng bố mẹ đang nằm ngay cạnh nhau trên cùng 1 màn hình!
-            for _ in range(2):
-                if self.should_stop():
-                    break
-                if picked_count >= 2 or not need:
-                    need.clear()
-                    break
-
-                # Chấm điểm TẤT CẢ rồng đang cần trên cùng khung hình hiện tại (Winner-Takes-All!)
-                candidates = []
-                for label, pp in need:
-                    res = self.vision.find_template(
-                        pp, threshold=thr, roi_rel=roi, screen_bgr=cur_scr, rect=cur_rct, **scale_options
-                    )
-                    if res.score > best_seen[label]:
-                        best_seen[label] = res.score
-                    if res.found:
-                        rel_x = (res.x - cur_rct.left) / max(1, cur_rct.width)
-                        min_rx, max_rx = max(0.05, float(roi[0]) - 0.02), min(0.95, float(roi[2]) + 0.02)
-                        if min_rx <= rel_x <= max_rx:
-                            candidates.append((res.score, label, pp, res))
-
-                if not candidates:
-                    break
-
-                # Chọn ứng viên có điểm khớp CAO NHẤT (tránh Rồng 1 cướp thẻ của Rồng 2!)
-                candidates.sort(key=lambda c: c[0], reverse=True)
-                _, label, pp, res = candidates[0]
-
-                l_before, r_before = self._count_empty_parent_slots(cur_scr, cur_rct)
-                patch_before = _card_patch(cur_scr, cur_rct, res.x, res.y)
-                if self.should_stop():
-                    break
-                self.log(f"⚡ [CHỌN RỒNG] Thấy {label} ({pp.stem}, {res.score:.2f}) -> Click ngay.")
-                self.input.click(res.x, res.y, post_delay=0.22 * self._spd, stop_check=self.should_stop)
-
-                chk_scr, chk_rct, (l_after, r_after) = _capture_after_parent_click((l_before, r_before))
-                if self.should_stop():
-                    return chk_scr, chk_rct
-                patch_after = _card_patch(chk_scr, chk_rct, res.x, res.y)
-                stable_geometry = (
-                    chk_rct.left == cur_rct.left and chk_rct.top == cur_rct.top
-                    and chk_rct.width == cur_rct.width and chk_rct.height == cur_rct.height
-                )
-                cur_scr, cur_rct = chk_scr, chk_rct
-                now_empty = (l_after, r_after)
-                entered_slots = [
-                    idx for idx, (before, after) in enumerate(zip((l_before, r_before), now_empty), 1)
-                    if before and not after
-                ]
-                if not stable_geometry or len(entered_slots) > 1 or any(
-                    now_empty[slot_idx - 1] for slot_idx in verified_slots
-                ):
-                    self.log("⚠️ [KIỂM CHỨNG] Vị trí hoặc trạng thái ô đã đổi bất ngờ -> Quét lại từ đầu.")
-                    return None
-                patch_changed = compute_frame_diff(patch_before, patch_after) > 5.0
-
-                if entered_slots:
-                    entered_slot = entered_slots[0]
-                    wrong_by_color = False
-                    s_crop = self._slot_crop_upper(cur_scr, entered_slot, self.vision.is_adb_mode)
-                    h_cur = self._dragon_hsv_hist(s_crop)
-                    if h_cur is not None:
-                        known_h = self._parent_slot_hists.get(pp.name)
-                        if known_h is not None:
-                            sim = float(cv2.compareHist(h_cur, known_h, cv2.HISTCMP_CORREL))
-                            if sim < 0.74:
-                                wrong_by_color = True
-                                self.log(f"⚠️ [KIỂM CHỨNG MÀU] Ô {entered_slot} khác màu {label} (khớp={sim:.2f}) -> Tự gỡ ra chọn lại!")
-                                self._click_upper_slot(cur_rct, entered_slot)
-                                cur_scr, cur_rct, (l_after, r_after) = _capture_after_parent_click(
-                                    (l_after, r_after), (entered_slot,)
-                                )
-                        elif res.score >= 0.86 and patch_changed:
-                            self._parent_slot_hists[pp.name] = h_cur
-
-                    if not wrong_by_color and (h_cur is not None or patch_changed):
-                        verified_slots[entered_slot] = pp.name
-                        need = [(lb, p) for lb, p in need if lb != label]
-                        picked_count = len(verified_slots)
-                elif not patch_changed:
-                    # Click không ăn -> thử lại 1 nhịp
-                    break
-            return cur_scr, cur_rct
-
-        def _confirm_final_slots(cur_s: np.ndarray, cur_r: WindowRect) -> bool:
-            if self.should_stop() or need or set(verified_slots.values()) != {p1_path.name, p2_path.name}:
+                self.log("[CHỌN RỒNG] Không xác nhận được hai ô bố mẹ đã trống.")
                 return False
-            ok_pair, bad_slots = self._verify_both_slots_bijection(
-                cur_s, p1_path, p2_path, recently_selected=True
+
+        remaining = {}
+        for index, path in enumerate((p1_path, p2_path), 1):
+            stars = self.config.get(f"selected_parent_{index}_stars")
+            if stars is not None and (type(stars) is not int or not 1 <= stars <= 99):
+                self.log(f"[CHỌN RỒNG] Số sao rồng {index} không hợp lệ.")
+                return False
+            if stars is None:
+                sample = imread_unicode(path)
+                if sample is not None and 0.87 <= sample.shape[1] / sample.shape[0] <= 1.14 and has_parent_star(sample):
+                    stars = self.text_matcher.read_parent_stars(parent_star_digits(sample))
+            remaining[index] = (path, stars)
+
+        best_seen = {1: 0.0, 2: 0.0}
+
+        def select_in_frame() -> Optional[list[ParentCard]]:
+            nonlocal frame
+            while remaining and not self.should_stop():
+                cards = find_parent_cards(frame, carousel.viewport, carousel.pitch)
+                ranked = {idx: [] for idx in remaining}
+                for card in cards:
+                    if not card.complete:
+                        continue
+                    before = card.crop(frame)
+                    if not has_parent_star(before):
+                        continue
+                    x1, y1, x2, y2 = card.bounds()
+                    relative = [(x1 + 0.1) / rect.width, (y1 + 0.1) / rect.height,
+                                (x2 + 0.1) / rect.width, (y2 + 0.1) / rect.height]
+                    read_stars = False
+                    observed_stars = None
+                    for index, (path, stars) in remaining.items():
+                        threshold = (0.79 if is_adb else 0.82) if stars is not None else 0.87
+                        match = self.vision.find_template(
+                            path, threshold=threshold, roi_rel=relative, screen_bgr=frame,
+                            rect=rect, compare_scales=True,
+                        )
+                        best_seen[index] = max(best_seen[index], match.score)
+                        if not match.found:
+                            continue
+                        if stars is not None and not read_stars:
+                            observed_stars = self.text_matcher.read_parent_stars(parent_star_digits(before))
+                            read_stars = True
+                        if stars is None or stars == observed_stars:
+                            ranked[index].append((match.score, card))
+
+                choices = []
+                for index, matches in ranked.items():
+                    matches.sort(key=lambda item: item[0], reverse=True)
+                    if not matches or (len(matches) > 1 and matches[0][0] - matches[1][0] < 0.04):
+                        continue
+                    score, card = matches[0]
+                    # Require a clear matching margin when both targets resemble the same tile.
+                    if any(other != index and any(tile == card and abs(other_score - score) < 0.04
+                                                 for other_score, tile in other_matches)
+                           for other, other_matches in ranked.items()):
+                        continue
+                    choices.append((remaining[index][1] is not None, score, index, card))
+                if not choices:
+                    return cards
+                _, score, index, card = max(choices, key=lambda item: item[:2])
+                path, stars = remaining[index]
+                empty_before = self._count_empty_parent_slots(frame, rect)
+                if empty_before.count(False) != len(self._verified_parent_slots):
+                    return None
+                before = card.crop(frame)
+                x = rect.left + (card.left + card.right) // 2
+                y = rect.top + card.top + round((card.bottom - card.top) * 0.57)
+                stars_label = f", {stars} sao" if stars is not None else ""
+                self.log(f"[CHỌN RỒNG] Thử rồng {index} ({path.stem}{stars_label}, khớp {score:.2f}).")
+                self.input.click(x, y, post_delay=settle, stop_check=self.should_stop)
+
+                confirmed_slot = None
+                for attempt in range(5):
+                    if self.should_stop():
+                        return None
+                    after, after_rect = self.vision.capture_window()
+                    if after_rect != rect:
+                        return None
+                    empty_after = self._count_empty_parent_slots(after, rect)
+                    filled = [slot for slot, (was_empty, is_empty) in enumerate(zip(empty_before, empty_after), 1)
+                              if was_empty and not is_empty]
+                    verified_now = None
+                    if len(filled) == 1 and parent_tile_was_emptied(before, card.crop(after)):
+                        slot = filled[0]
+                        shape = self._parent_slot_shape(self._slot_crop_upper(after, slot, is_adb))
+                        unchanged = all(not empty_after[old_slot - 1] and self._parent_slot_matches(after, old_slot, old_shape)
+                                        for old_slot, old_shape in self._verified_parent_slots.items())
+                        if shape is not None and unchanged:
+                            verified_now = (slot, shape)
+                            if (confirmed_slot is not None and confirmed_slot[0] == slot
+                                    and self._parent_slot_matches(after, slot, confirmed_slot[1])):
+                                self._verified_parent_slots[slot] = shape
+                                del remaining[index]
+                                frame = after
+                                self.log(f"[CHỌN RỒNG] Đã xác minh rồng {index}{stars_label} vào ô {slot}.")
+                                break
+                    confirmed_slot = verified_now
+                    if attempt == 4 or not self.input.sleep_interruptible(0.10, self.should_stop):
+                        self.log(f"[CHỌN RỒNG] Thẻ rồng {index} chưa trống đúng vị trí sau cú bấm. Dừng kiểm chứng.")
+                        return None
+            return [] if not remaining else None
+
+        def swipe(gesture: Tuple[int, int, int, int]) -> Tuple[bool, Optional[int]]:
+            nonlocal frame
+            x1, y1, x2, y2 = gesture
+            before = frame
+            self.input.smooth_drag(
+                rect.left + x1, rect.top + y1, rect.left + x2, rect.top + y2,
+                duration=0.42 * self._spd, hold_end=0.12, stop_check=self.should_stop,
             )
-            if ok_pair:
-                return True
-            self.log(f"⚠️ [KIỂM CHỨNG] Ô bố mẹ {bad_slots} chưa khớp cặp đã chọn.")
-            for s_idx in bad_slots:
-                self._click_upper_slot(cur_r, s_idx)
-            return False
+            if not self.input.sleep_interruptible(settle, self.should_stop):
+                return False, None
+            previous = None
+            for attempt in range(5):
+                next_frame, current_rect = self.vision.capture_window()
+                if current_rect != rect or self.should_stop():
+                    return False, None
+                # ADB can deliver an old screenshot immediately after a gesture.
+                moved = compute_frame_diff(before[row], next_frame[row]) > 1.2
+                settled = previous is not None and compute_frame_diff(previous[row], next_frame[row]) < 1.2
+                if settled and (moved or attempt >= 2):
+                    frame = next_frame
+                    return True, carousel.measure_shift(before, frame)
+                previous = next_frame
+                if attempt == 4 or not self.input.sleep_interruptible(0.10, self.should_stop):
+                    break
+            self.log("[THANH RỒNG] Chưa có ảnh ổn định sau khi vuốt.")
+            return False, None
 
-        picked = _try_pick_visible(scr0, rect0)
-        if picked is None or self.should_stop():
-            return False
-        prev_scr, prev_rect = picked
-        if picked_count >= 2 and not need:
-            if _confirm_final_slots(prev_scr, prev_rect):
-                return True
-            return False
-        if not can_swipe:
-            self.log("⚠️ [THANH RỒNG] Vùng quét quá hẹp để vuốt — hãy hiệu chỉnh lại bottom_bar_roi!")
-            return False
-
-        pref_dir = self.dir_memory.preferred_direction(p1_path.name, p2_path.name)
-        if pref_dir == "left":
-            directions = [
-                ("left", "kéo sang trái (hướng nhớ)", end_rel, start_rel, full_limit),
-                ("right", "kéo ngược sang phải", start_rel, end_rel, full_limit),
-            ]
-        else:
-            directions = [
-                ("right", "kéo sang phải", start_rel, end_rel, full_limit),
-                ("left", "kéo ngược sang trái", end_rel, start_rel, full_limit),
-            ]
-
-        for dir_code, dir_name, p_from, p_to, limit in directions:
-            stuck_count = 0
-            for step in range(1, limit + 1):
-                if picked_count >= 2 or not need:
-                    return True
-                if not self.wait_if_paused():
-                    return False
-                if self._check_bag_full(prev_scr, prev_rect):
-                    return False
-
-                before_roi, _, _ = self.vision.crop_roi(prev_scr, prev_rect, roi)
-                # Không gọi adjust_rel_point lần 2 vì tọa độ đã nằm trực tiếp trên khung game!
-                x1, y1 = prev_rect.rel_to_abs(p_from[0], p_from[1])
-                x2, y2 = prev_rect.rel_to_abs(p_to[0], p_to[1])
-                if abs(x1 - x2) < 12 and abs(y1 - y2) < 12:
-                    self.log("⚠️ [THANH RỒNG] Hai đầu vuốt quá gần nhau -> Hủy vuốt, cần hiệu chỉnh vùng quét!")
-                    return False
-                rem_lbl = " & ".join(lb for lb, _ in need)
-                self.log_tech(f"[THANH RỒNG] {dir_name} ({step}/{limit}) tìm {rem_lbl}...")
-                self.input.smooth_drag(
-                    x1, y1, x2, y2, duration=drag_dur, hold_end=hold_end, stop_check=self.should_stop
-                )
+        def scan_with_nudge(*, require_geometry: bool = False) -> bool:
+            nonlocal frame
+            cards = select_in_frame()
+            if cards is None or not remaining:
+                return cards is not None
+            if not cards and require_geometry:
                 if not self.input.sleep_interruptible(settle, self.should_stop):
                     return False
+                frame, current_rect = self.vision.capture_window()
+                if current_rect != rect:
+                    return False
+                cards = select_in_frame()
+                if cards is None or not remaining:
+                    return cards is not None
+                if not cards:
+                    self.log("[THANH RỒNG] Chưa xác định được các đường phân cách giữa thẻ.")
+                    return False
+            clipped = [
+                card for card in cards
+                if not card.complete and has_visible_parent_star(card, frame)
+            ]
+            if not clipped:
+                return True
+            card = max(clipped, key=lambda item: item.visible_width)
+            gesture = carousel.nudge_swipe(card.left, card.right)
+            if gesture is None:
+                return True
+            self.log_tech("[THANH RỒNG] Căn thẻ bị cắt ở mép trước khi quét tiếp.")
+            settled, _ = swipe(gesture)
+            return settled and select_in_frame() is not None
 
-                after_scr, after_rect = self.vision.capture_window()
-                after_roi, _, _ = self.vision.crop_roi(after_scr, after_rect, roi)
-                motion = compute_frame_diff(before_roi, after_roi)
-                if is_adb and motion < 1.2:
-                    if not self.input.sleep_interruptible(0.10, self.should_stop):
+        if not scan_with_nudge(require_geometry=True):
+            return False
+        if not remaining:
+            return self._selected_pair_still_present(frame, rect)
+        edge = CarouselEdgeTracker()
+        # A smaller swipe needs more steps to cover the same number of cards.
+        limit = max(1, int(self._drag_cfg("max_parent_scrolls", 24))) * 2
+        first = 1 if self.dir_memory.preferred_direction(p1_path.name, p2_path.name) == "left" else -1
+        for direction in (first, -first):
+            for _ in range(limit):
+                if not self.wait_if_paused() or self._check_bag_full(frame, rect):
+                    return False
+                if terminal_gap(frame, carousel.viewport, carousel.pitch, direction):
+                    break
+                gesture = carousel.page_swipe(direction)
+                if gesture is None:
+                    break
+                before_swipe = frame
+                settled, shift = swipe(gesture)
+                if not settled:
+                    return False
+                if shift is not None and not carousel.keeps_card_overlap(shift):
+                    # Undo the excess with a measured correction before scanning this page.
+                    x1, y1, _, _ = gesture
+                    dx = min(carousel.pitch, abs(shift) - carousel.pitch)
+                    corrected, correction = swipe((x1, y1, x1 - (dx if shift > 0 else -dx), y1))
+                    if not corrected or correction is None:
+                        self.log("[THANH RỒNG] Cú vuốt dài, chưa thể xác nhận phần thẻ chồng nhau.")
                         return False
-                    after_scr, after_rect = self.vision.capture_window()
-                    after_roi, _, _ = self.vision.crop_roi(after_scr, after_rect, roi)
-                    motion = compute_frame_diff(before_roi, after_roi)
-                picked = _try_pick_visible(after_scr, after_rect)
-                if picked is None or self.should_stop():
+                    shift = carousel.measure_shift(before_swipe, frame)
+                    if shift is None or not carousel.keeps_card_overlap(shift):
+                        return False
+                reached_edge = terminal_gap(frame, carousel.viewport, carousel.pitch, direction) or edge.observe(direction, shift)
+                # Keep the endpoint frame as the basis for the next direction.
+                scanned = select_in_frame() is not None if reached_edge else scan_with_nudge()
+                if not scanned:
                     return False
-                prev_scr, prev_rect = picked
-                if picked_count >= 2 and not need:
-                    if _confirm_final_slots(prev_scr, prev_rect):
-                        self.dir_memory.record(p1_path.name, p2_path.name, dir_code)
-                        return True
-                    return False
+                if not remaining:
+                    self.dir_memory.record(p1_path.name, p2_path.name, "left" if direction > 0 else "right")
+                    return self._selected_pair_still_present(frame, rect)
+                if reached_edge:
+                    break
 
-                if motion < 1.2:
-                    stuck_count += 1
-                    if stuck_count >= 3:
-                        break
-                else:
-                    stuck_count = 0
-
-        for label, pp in need:
-            self.log(f"[CẢNH BÁO] Chưa thấy {label} ({pp.stem}) (max={best_seen[label]:.2f} / {thr:.2f}).")
+        for index, (path, stars) in remaining.items():
+            detail = f" {stars} sao" if stars is not None else ""
+            self.log(f"[CHỌN RỒNG] Chưa xác minh được rồng {index} ({path.stem}{detail}, khớp cao nhất {best_seen[index]:.2f}).")
         return False
 
     def _step_select_parents(self) -> BotState:
@@ -1283,7 +1241,11 @@ class DaoRongBot:
             return BotState.OPEN_BREED
 
         if not self._select_parents_dual_fast(p1_path, p2_path):
-            return BotState.EXIT_BREED_TO_DUST if self._check_bag_full() else BotState.OPEN_BREED
+            if self._check_bag_full():
+                return BotState.EXIT_BREED_TO_DUST
+            if not self.should_stop():
+                self._trigger_alert_and_pause("Chưa xác minh đủ rồng bố mẹ", "Xem nhật ký chọn rồng và kiểm tra ảnh mẫu, số sao của từng con.")
+            return BotState.SELECT_PARENTS
 
         sb_path = self._ui("btn_start_breed.png")
         if self.should_stop():
@@ -1294,16 +1256,24 @@ class DaoRongBot:
         sb_roi = self.calibrator.get_roi(self._mode_key, "btn_start_breed.png") or [0.38, 0.48, 0.58, 0.65]
         threshold = self._conf("button", 0.76)
         scale_options = {"compare_scales": True} if self.vision.is_adb_mode else {}
-        res = self.vision.wait_for_template(
+        self.vision.wait_for_template(
             sb_path, timeout=2.0, threshold=threshold, roi_rel=sb_roi, stop_check=self.should_stop, **scale_options
         )
-        if not res.found and not self.should_stop():
-            res = self.vision.find_template(sb_path, threshold=threshold, **scale_options)
         if self.should_stop():
             return BotState.OPEN_BREED
+        screen, rect = self.vision.capture_window()
+        if not self._selected_pair_still_present(screen, rect):
+            self._trigger_alert_and_pause("Ô bố mẹ đã thay đổi", "Cần xác minh lại cả hai rồng trước khi lai.")
+            return BotState.SELECT_PARENTS
+        res = self.vision.find_template(
+            sb_path, threshold=threshold, roi_rel=sb_roi,
+            screen_bgr=screen, rect=rect, **scale_options,
+        )
         if not res.found:
             self._trigger_alert_and_pause("Chưa thấy nút Lai Rồng", "Hãy kiểm tra lại hai ô bố mẹ và giao diện lai.")
             return BotState.SELECT_PARENTS
+        if self.should_stop():
+            return BotState.OPEN_BREED
         self.log_tech(f"[LAI RỒNG] Click 'Lai Rồng' ({res.x}, {res.y}).")
         self.input.click(res.x, res.y, post_delay=0.10, stop_check=self.should_stop)
         if self.should_stop():

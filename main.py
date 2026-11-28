@@ -92,6 +92,7 @@ ACCURACY_PRESETS = {
 }
 DUST_RARITIES = ("Phổ biến", "Nguyên Liệu", "Hiếm", "Cực hiếm", "Event")
 NO_PARENT_SAMPLE = "(Chưa có mẫu)"
+PARENT_STAR_KEYS = ("selected_parent_1_stars", "selected_parent_2_stars")
 
 REQUIRED_UI_TEMPLATES = [
     ("btn_egg.png", "Quả trứng ở đảo lai", True),
@@ -131,6 +132,15 @@ def _nonnegative_int(value: Any) -> int:
     if number < 0:
         raise ValueError("Cần số nguyên không âm")
     return number
+
+
+def _optional_parent_stars(value: Any) -> Optional[int]:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    stars = _nonnegative_int(value)
+    if not 1 <= stars <= 99:
+        raise ValueError("Số sao phải trong khoảng 1–99.")
+    return stars
 
 
 def _config_object(path: Path) -> Dict[str, Any]:
@@ -180,6 +190,12 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
             cfg[key] = default
             if key == "dust_max_star":
                 cfg["dust_rarities"] = []
+    for key in PARENT_STAR_KEYS:
+        try:
+            cfg[key] = _optional_parent_stars(cfg.get(key))
+        except ValueError:
+            # Giữ lại giá trị sai để báo lỗi khi bắt đầu, tránh âm thầm bỏ điều kiện sao.
+            pass
     auto_stop = dict(cfg.get("auto_stop", {}))
     for key in ("max_minutes", "max_breeds", "stop_on_rare_count"):
         try:
@@ -614,6 +630,21 @@ class DaoRongStudioV10(ctk.CTk):
         ctk.CTkButton(
             r2, text="↻", width=28, height=28, corner_radius=7, fg_color=C["card2"], text_color=C["amber"],
             command=self._reset_parent_selection,
+        ).pack(side="left")
+
+        stars_row = ctk.CTkFrame(cfg_card, fg_color="transparent")
+        stars_row.pack(fill="x", padx=12, pady=(0, 4))
+        self.var_parent_stars: Dict[str, tk.StringVar] = {}
+        for slot, key in enumerate(PARENT_STAR_KEYS, 1):
+            value = self.config_data.get(key)
+            variable = tk.StringVar(value="" if value is None else str(value))
+            self.var_parent_stars[key] = variable
+            ctk.CTkLabel(stars_row, text=f"Sao rồng {slot}", text_color=C["sub"], font=ctk.CTkFont("Segoe UI", 11)).pack(side="left", padx=(0, 6))
+            ctk.CTkEntry(stars_row, textvariable=variable, width=42, height=24).pack(side="left", padx=(0, 12))
+        self._help_btn(
+            stars_row, "Số sao rồng bố mẹ",
+            "Nhập số sao 1–99 của từng rồng để phân biệt các con có hình giống nhau. "
+            "Nếu để trống, tool sẽ thử đọc sao từ ảnh mẫu có đủ thẻ.",
         ).pack(side="left")
 
         # Dòng 3: Tốc độ + Rồng chưa có luật
@@ -1352,11 +1383,14 @@ class DaoRongStudioV10(ctk.CTk):
         select_box_overlay(self, "Khoanh vùng 2 cột Túi Chứa Rồng Hóa Bụi", lambda a, b, c, d: self._save_rel_box("dust_list_roi", a, b, c, d))
 
     def _reset_parent_selection(self) -> None:
-        self.config_data["selected_parent_1"] = ""
-        self.config_data["selected_parent_2"] = ""
-        save_config(self.config_data)
+        cfg = {**self.config_data, "selected_parent_1": "", "selected_parent_2": ""}
+        cfg.update(dict.fromkeys(PARENT_STAR_KEYS))
+        if not self._persist_settings(cfg):
+            return
         self.var_p1.set("(Chưa có mẫu)")
         self.var_p2.set("(Chưa có mẫu)")
+        for variable in self.var_parent_stars.values():
+            variable.set("")
         self.append_log("Đã đặt lại cặp rồng bố mẹ.")
 
     def _run_preflight_ui(self) -> None:
@@ -1450,6 +1484,9 @@ class DaoRongStudioV10(ctk.CTk):
                     cfg[key] = {**cfg.get(key, {}), **value}
                 else:
                     cfg[key] = value
+            # Profile cũ chưa có điều kiện sao không kế thừa sao từ cặp đã chọn khác.
+            for key in PARENT_STAR_KEYS:
+                cfg[key] = profile.get(key)
         return _normalize_config(cfg)
 
     def _save_new_profile(self) -> None:
@@ -1488,6 +1525,9 @@ class DaoRongStudioV10(ctk.CTk):
         self.var_win_title.set(self.config_data.get("window_title_keyword", "AUTO"))
         self.var_p1.set(self.config_data.get("selected_parent_1") or "(Chưa có mẫu)")
         self.var_p2.set(self.config_data.get("selected_parent_2") or "(Chưa có mẫu)")
+        for key, variable in self.var_parent_stars.items():
+            value = self.config_data.get(key)
+            variable.set("" if value is None else str(value))
         self.var_bot_mode_vn.set(self._mode_to_vn.get(self.config_data.get("bot_mode", "breed_and_dust"), "Lai + Hóa Bụi"))
         self.var_ctrl_mode_vn.set(self._ctrl_to_vn.get(self.config_data.get("control_mode", "windows"), "Chuột Thường"))
         self.var_unknown_vn.set(self._unk_map_to_vn.get(self.config_data.get("unknown_dragon_action", "keep"), "Cất"))
@@ -1592,6 +1632,14 @@ class DaoRongStudioV10(ctk.CTk):
         return True
 
     def _save_all_settings(self, silent: bool = False) -> bool:
+        parent_stars = {}
+        for slot, key in enumerate(PARENT_STAR_KEYS, 1):
+            try:
+                parent_stars[key] = _optional_parent_stars(self.var_parent_stars[key].get())
+            except ValueError:
+                if not silent:
+                    messagebox.showerror("Số sao bố mẹ", f"Số sao rồng {slot} phải là số nguyên từ 1–99 hoặc để trống.", parent=self)
+                return False
         try:
             hops_val = _nonnegative_int(self.var_hops.get().strip() or 2)
             dust_max_val = _nonnegative_int(self.var_dust_max_star.get().strip() or 0)
@@ -1604,7 +1652,7 @@ class DaoRongStudioV10(ctk.CTk):
                 messagebox.showerror("Sai định dạng", "Các ô số (lọc sao, số đảo, hẹn giờ, watchdog) phải là số nguyên không âm.")
             return False
 
-        cfg = dict(self.config_data)
+        cfg = {**self.config_data, **parent_stars}
         cfg["window_title_keyword"] = self.var_win_title.get().strip() or "AUTO"
         cfg["selected_parent_1"] = "" if self.var_p1.get() == NO_PARENT_SAMPLE else self.var_p1.get()
         cfg["selected_parent_2"] = "" if self.var_p2.get() == NO_PARENT_SAMPLE else self.var_p2.get()
@@ -1690,6 +1738,12 @@ class DaoRongStudioV10(ctk.CTk):
             self._start_bot(restart_from_egg=True)
 
     def _validate_run_config(self, cfg: Dict[str, Any], label: str) -> bool:
+        for slot, key in enumerate(PARENT_STAR_KEYS, 1):
+            try:
+                _optional_parent_stars(cfg.get(key))
+            except ValueError:
+                messagebox.showwarning("Số sao bố mẹ", f"{label}: số sao rồng {slot} phải là số nguyên từ 1–99 hoặc để trống.", parent=self)
+                return False
         p1 = cfg.get("selected_parent_1", "")
         p2 = cfg.get("selected_parent_2", "")
         if not p1 or not p2:

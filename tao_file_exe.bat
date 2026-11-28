@@ -15,7 +15,7 @@ if errorlevel 1 goto :ERR
 
 echo [2/4] Dang ma hoa ma nguon bang PyArmor...
 if exist "build_obf" rmdir /s /q "build_obf"
-".venv\Scripts\pyarmor.exe" gen -O build_obf main.py bot_engine.py vision.py actions.py capture_tool.py ocr_engine.py updater.py adb_controller.py smart_ai.py notifier.py yolo_vision.py
+".venv\Scripts\pyarmor.exe" gen -O build_obf main.py bot_engine.py vision.py actions.py capture_tool.py ocr_engine.py updater.py adb_controller.py smart_ai.py notifier.py yolo_vision.py carousel.py parent_cards.py
 if errorlevel 1 goto :FALLBACK_NO_OBF
 
 if exist "build" rmdir /s /q "build"
