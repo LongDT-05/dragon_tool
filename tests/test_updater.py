@@ -37,7 +37,8 @@ class StageUpdateTest(unittest.TestCase):
             self.assertNotEqual(first.parent, second.parent)
             for script, destination, exe in ((first, "app1", b"first"), (second, "app2", b"second")):
                 contents = script.read_text(encoding="utf-8")
-                self.assertIn(str(root / destination), contents)
+                resolved_app_dir = (root / destination).resolve()
+                self.assertIn(f'"{resolved_app_dir}\\DaoRong_tool.exe"', contents)
                 self.assertNotIn("config.json", contents)
                 self.assertEqual((script.parent / "extracted/bundle/DaoRong_tool.exe").read_bytes(), exe)
 
