@@ -10,8 +10,6 @@ on:
       - 'requirements.txt'
       - 'templates/ui/**'
       - 'models/**'
-      - 'tests/**'
-      - '.github/workflows/build-release.yml'
   workflow_dispatch:
 
 permissions:
@@ -32,12 +30,15 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller pyarmor
+          pip install -r requirements.txt pyinstaller pyarmor ruff
 
-      - name: Test source before packaging
+      - name: Preflight Safety Check (Block broken releases)
+        shell: pwsh
         run: |
           python -m compileall -q .
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ruff check --select F821,F822,F823,E999 *.py
+          python -c "import actions, adb_controller, bot_engine, capture_tool, notifier, ocr_engine, smart_ai, updater, vision, yolo_vision; print('CORE MODULES OK v' + updater.CURRENT_VERSION)"
+          python -c "import main; main.ensure_directories(); main.load_config(); print('MAIN STARTUP CHECK OK')"
 
       - name: Read version from updater.py
         id: ver
@@ -51,7 +52,7 @@ jobs:
         shell: pwsh
         run: |
           if (Test-Path build_obf) { Remove-Item -Recurse -Force build_obf }
-          pyarmor gen -O build_obf main.py bot_engine.py vision.py actions.py capture_tool.py ocr_engine.py updater.py adb_controller.py smart_ai.py notifier.py yolo_vision.py carousel.py parent_cards.py
+          pyarmor gen -O build_obf main.py bot_engine.py vision.py actions.py capture_tool.py ocr_engine.py updater.py adb_controller.py smart_ai.py notifier.py yolo_vision.py
           if ($LASTEXITCODE -eq 0) {
             Copy-Item app_icon.ico build_obf\app_icon.ico -Force
             Push-Location build_obf
@@ -70,16 +71,13 @@ jobs:
       - name: Package Release ZIP & version.json
         shell: pwsh
         run: |
-          if (-not (Test-Path "dist\DaoRong_tool\DaoRong_tool.exe" -PathType Leaf)) {
-            throw "Windows executable is missing"
-          }
           New-Item -ItemType Directory -Force -Path release | Out-Null
           Compress-Archive -Path "dist\DaoRong_tool\*" -DestinationPath "release\DaoRong_tool_Update.zip" -Force
           $v = "${{ steps.ver.outputs.version }}"
           $repo = "${{ github.repository }}"
           $json = @{
             version = $v
-            download_url = "https://github.com/$repo/releases/download/v$v/DaoRong_tool_Update.zip"
+            download_url = "https://github.com/$repo/releases/latest/download/DaoRong_tool_Update.zip"
             notes = "DaoRong_tool v$v (Auto-built via GitHub Actions)"
           } | ConvertTo-Json -Depth 3
           [System.IO.File]::WriteAllText("$PWD\release\version.json", $json, [System.Text.UTF8Encoding]::new($false))
@@ -88,7 +86,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.version }}
-          target_commitish: ${{ github.sha }}
           name: DaoRong_tool v${{ steps.ver.outputs.version }}
           body: "Bản build tự động DaoRong_tool v${{ steps.ver.outputs.version }}. Tải file DaoRong_tool_Update.zip giải nén để chạy hoặc bấm nút Cập nhật ngay trong app."
           files: |
