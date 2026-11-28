@@ -115,7 +115,6 @@ REQUIRED_UI_TEMPLATES = [
 def ensure_directories() -> None:
     for sub in ["ui", "parents", "keep", "sell", "bless", "dust_targets", "protect_dust"]:
         (TEMPLATES_DIR / sub).mkdir(parents=True, exist_ok=True)
-    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_config() -> Dict[str, Any]:
