@@ -344,6 +344,7 @@ class DaoRongStudioV10(ctk.CTk):
         self._hud_lbl_status: Optional[ctk.CTkLabel] = None
         self._hud_lbl_kpi: Optional[ctk.CTkLabel] = None
         self._pending_update_info = None
+        self._update_in_progress = False
         self._last_notified_update_ver = ""
         self._log_line_count = 0
 
@@ -1929,7 +1930,12 @@ class DaoRongStudioV10(ctk.CTk):
 
     def _check_update_async(self, silent: bool = False) -> None:
         url = self.config_data.get("update_manifest_url", "") or DEFAULT_MANIFEST_URL
-        threading.Thread(target=lambda: self.after(0, lambda: self._handle_update_result(check_for_update(url), silent)), daemon=True).start()
+
+        def worker() -> None:
+            info = check_for_update(url)
+            self.after(0, self._handle_update_result, info, silent)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _handle_update_result(self, info, silent: bool) -> None:
         if info.error:
@@ -1964,20 +1970,33 @@ class DaoRongStudioV10(ctk.CTk):
 
     def _apply_pending_update(self) -> None:
         info = self._pending_update_info
-        if not info:
+        if not info or self._update_in_progress:
             return
         if not messagebox.askyesno("Cập nhật bản mới", f"Tải và cập nhật lên v{info.latest_version} ngay?\n(Toàn bộ rồng bố mẹ, luật rồng và Profile sẽ được giữ nguyên)", parent=self):
             return
         self.on_stop_all()
+        self._update_in_progress = True
         win = ctk.CTkToplevel(self)
         win.title("Đang cập nhật...")
         win.geometry("380x120")
         win.attributes("-topmost", True)
+        win.protocol("WM_DELETE_WINDOW", lambda: None)
         lbl = ctk.CTkLabel(win, text="Đang tải bản cập nhật...", font=ctk.CTkFont("Segoe UI", 12, "bold"))
         lbl.pack(pady=(18, 8))
         bar = ctk.CTkProgressBar(win, width=320)
         bar.set(0.05)
         bar.pack(pady=6)
+
+        def show_error(error: str) -> None:
+            self._update_in_progress = False
+            win.destroy()
+            messagebox.showerror("Lỗi cập nhật", error, parent=self)
+
+        def apply_update(bat: Path) -> None:
+            try:
+                launch_updater_and_exit(bat)
+            except OSError as exc:
+                show_error(str(exc))
 
         def worker() -> None:
             try:
@@ -1985,9 +2004,10 @@ class DaoRongStudioV10(ctk.CTk):
                     info.download_url, BASE_DIR,
                     progress_cb=lambda r, t: self.after(0, lambda: (bar.set(r), lbl.configure(text=t))),
                 )
-                self.after(0, lambda: launch_updater_and_exit(bat))
             except Exception as exc:
-                self.after(0, lambda: (win.destroy(), messagebox.showerror("Lỗi cập nhật", str(exc))))
+                self.after(0, show_error, str(exc))
+                return
+            self.after(0, apply_update, bat)
 
         threading.Thread(target=worker, daemon=True).start()
 
