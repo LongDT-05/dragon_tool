@@ -12,7 +12,9 @@ import os
 import random
 import shutil
 import struct
+import queue
 import subprocess
+import threading
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +57,7 @@ class AdbController:
         self.custom_adb_path = custom_adb_path.strip()
         self._adb_path: Optional[str] = None
         self._capture_mode: Dict[str, str] = {}
+        self._shell_pipes: Dict[str, Tuple[subprocess.Popen, queue.Queue, threading.Lock]] = {}
 
     def find_adb_executable(self) -> Optional[str]:
         custom = (self.custom_adb_path or "").strip()
@@ -211,12 +214,78 @@ class AdbController:
                     pass
         return None
 
+    def _close_shell_pipe(self, serial: str) -> None:
+        item = self._shell_pipes.pop(serial, None)
+        if item is not None:
+            proc = item[0]
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def _run_fast_shell_cmd(self, serial: str, cmd: str, timeout: float = 3.5) -> bool:
+        """Gửi lệnh qua phiên adb shell mở sẵn (bỏ thời gian khởi tạo adb.exe trên Windows). Tự động lùi về _run nếu lỗi."""
+        adb = self.find_adb_executable()
+        if not adb:
+            return False
+        item = self._shell_pipes.get(serial)
+        if item is None or item[0].poll() is not None:
+            self._close_shell_pipe(serial)
+            try:
+                flags = 0x08000000 if os.name == "nt" else 0
+                proc = subprocess.Popen(
+                    [adb, "-s", serial, "shell"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=flags,
+                )
+                q: queue.Queue = queue.Queue()
+                def _reader(p=proc, out_q=q):
+                    try:
+                        while True:
+                            line = p.stdout.readline()
+                            if not line:
+                                break
+                            out_q.put(line)
+                    except Exception:
+                        pass
+                threading.Thread(target=_reader, daemon=True).start()
+                item = (proc, q, threading.Lock())
+                self._shell_pipes[serial] = item
+            except Exception:
+                return False
+
+        proc, q, lock = item
+        with lock:
+            if proc.poll() is not None or proc.stdin is None:
+                self._close_shell_pipe(serial)
+                return False
+            try:
+                while not q.empty():
+                    q.get_nowait()
+                marker = b"__DR_OK__"
+                proc.stdin.write(f"{cmd}; echo __DR_OK__\n".encode("utf-8"))
+                proc.stdin.flush()
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    rem = max(0.05, deadline - time.monotonic())
+                    line = q.get(timeout=rem)
+                    if marker in line:
+                        return True
+            except Exception:
+                pass
+        self._close_shell_pipe(serial)
+        return False
+
     def tap(self, serial: str, x: int, y: int, jitter_px: int = 4) -> None:
         jx = int(round(random.gauss(0, jitter_px * 0.5))) if jitter_px > 0 else 0
         jy = int(round(random.gauss(0, jitter_px * 0.5))) if jitter_px > 0 else 0
         jx = max(-jitter_px, min(jitter_px, jx))
         jy = max(-jitter_px, min(jitter_px, jy))
         tx, ty = max(1, int(x + jx)), max(1, int(y + jy))
+        if self._run_fast_shell_cmd(serial, f"input tap {tx} {ty}", timeout=3.2):
+            return
         proc = self._run(["shell", "input", "tap", str(tx), str(ty)], serial=serial, timeout=3.0)
         if proc.returncode != 0:
             err = proc.stderr.decode("utf-8", errors="ignore").strip() or proc.stdout.decode("utf-8", errors="ignore").strip()

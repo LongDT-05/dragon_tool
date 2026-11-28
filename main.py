@@ -55,7 +55,6 @@ BASE_DIR = (
 )
 CONFIG_PATH = BASE_DIR / "config.json"
 TEMPLATES_DIR = BASE_DIR / "templates"
-PROFILES_DIR = BASE_DIR / "profiles"
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -210,7 +209,6 @@ class DaoRongStudioV10(ctk.CTk):
         self.adb_ctrl = AdbController(BASE_DIR, self.config_data.get("adb_path", ""))
         self.adb_device_vars: Dict[str, tk.BooleanVar] = {}
         self.adb_device_status_lbls: Dict[str, ctk.CTkLabel] = {}
-        self.adb_device_profiles: Dict[str, tk.StringVar] = {}
         self.adb_device_btns: Dict[str, ctk.CTkButton] = {}
 
         self.shared_text_matcher = DragonTextMatcher(catalog=self.catalog)
@@ -781,8 +779,6 @@ class DaoRongStudioV10(ctk.CTk):
         self.var_collect_ai = tk.BooleanVar(value=bool(self.config_data.get("collect_ai_dataset", False)))
         self.var_watchdog_relaunch = tk.BooleanVar(value=bool(self.config_data.get("watchdog_relaunch", True)))
         self.var_remote_notify = tk.BooleanVar(value=bool(self.config_data.get("enable_remote_notify", False)))
-        self.var_tg_token = tk.StringVar(value=str(self.config_data.get("telegram_token", "")))
-        self.var_tg_chat = tk.StringVar(value=str(self.config_data.get("telegram_chat_id", "")))
         self.var_dc_webhook = tk.StringVar(value=str(self.config_data.get("discord_webhook", "")))
 
         # Nhóm Hóa Bụi An Toàn
@@ -848,18 +844,6 @@ class DaoRongStudioV10(ctk.CTk):
         ctk.CTkEntry(as_r, textvariable=self.var_as_rare, width=60, fg_color=C["card"]).pack(side="left", padx=(0, 12))
         ctk.CTkCheckBox(as_r, text="Dừng ngay khi nổ Cực hiếm / Event", variable=self.var_as_epic, font=ctk.CTkFont("Segoe UI", 11)).pack(side="left")
 
-        # Profile nhanh
-        c4 = ctk.CTkFrame(sc_b, corner_radius=10, fg_color=C["console"], border_width=1, border_color=C["border"])
-        c4.pack(fill="x", pady=(0, 6))
-        pf_r = ctk.CTkFrame(c4, fg_color="transparent")
-        pf_r.pack(fill="x", padx=12, pady=8)
-        ctk.CTkLabel(pf_r, text="PROFILE NHANH:", font=ctk.CTkFont("Segoe UI", 11, "bold"), text_color=C["accent"]).pack(side="left", padx=(0, 8))
-        self.var_profile_sel = tk.StringVar(value=self.config_data.get("active_profile", "Mặc định"))
-        self.combo_profile = ctk.CTkOptionMenu(pf_r, variable=self.var_profile_sel, values=self._list_profiles(), width=155, fg_color=C["card"], button_color=C["card2"])
-        self.combo_profile.pack(side="left", padx=(0, 6))
-        ctk.CTkButton(pf_r, text="Tải", width=60, height=28, fg_color=C["primary"], command=self._load_selected_profile).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(pf_r, text="Lưu Profile mới", width=115, height=28, fg_color=C["purple"], command=self._save_new_profile).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(pf_r, text="Xóa", width=55, height=28, fg_color="#3B0D16", hover_color=C["red"], text_color="#FDA4AF", command=self._delete_selected_profile).pack(side="left")
 
         # --- TAB 2: TREO 24/7 & THÔNG BÁO (Gọn sạch, chỉ giữ tính năng cho người dùng) ---
         sc_a = ctk.CTkScrollableFrame(tab_adv, fg_color="transparent")
@@ -893,22 +877,26 @@ class DaoRongStudioV10(ctk.CTk):
         ctk.CTkButton(amr, text="Dọn bộ nhớ tên", width=108, height=26, fg_color="#3B0D16", hover_color=C["red"], text_color="#FDA4AF", command=self._clear_ai_cache).pack(side="right", padx=(6, 0))
         ctk.CTkButton(amr, text="Ảnh Rồng Quý", width=104, height=26, fg_color="#064E3B", command=self._open_rare_shots_folder).pack(side="right")
 
-        # Thẻ Thông Báo Điện Thoại (Telegram / Discord)
+        # Thẻ Thông Báo Qua Discord (tự lưu ngay khi dán link hoặc bật/tắt)
         ntf = ctk.CTkFrame(sc_a, corner_radius=10, fg_color=C["console"], border_width=1, border_color=C["border"])
         ntf.pack(fill="x", pady=(0, 8))
         nh = ctk.CTkFrame(ntf, fg_color="transparent")
         nh.pack(fill="x", padx=12, pady=(8, 4))
-        ctk.CTkLabel(nh, text="THÔNG BÁO VỀ ĐIỆN THOẠI (TELEGRAM / DISCORD)", font=ctk.CTkFont("Segoe UI", 11, "bold"), text_color=C["accent"]).pack(side="left")
+        ctk.CTkLabel(nh, text="THÔNG BÁO QUA DISCORD", font=ctk.CTkFont("Segoe UI", 11, "bold"), text_color=C["accent"]).pack(side="left")
         ctk.CTkButton(nh, text="Gửi thử", width=74, height=24, corner_radius=6, fg_color=C["primary"], font=ctk.CTkFont("Segoe UI", 11, "bold"), command=self._test_remote_notify).pack(side="right")
-        ctk.CTkSwitch(ntf, text="Gửi ảnh chụp về điện thoại khi nổ rồng Chúc phúc / Cực hiếm / Event hoặc khi lỗi dừng", variable=self.var_remote_notify, font=ctk.CTkFont("Segoe UI", 11)).pack(anchor="w", padx=12, pady=(0, 6))
+        ctk.CTkSwitch(
+            ntf,
+            text="Gửi ảnh chụp về Discord khi nổ rồng Chúc phúc / Cực hiếm / Event hoặc khi lỗi dừng",
+            variable=self.var_remote_notify,
+            command=lambda: self._save_all_settings(silent=True),
+            font=ctk.CTkFont("Segoe UI", 11),
+        ).pack(anchor="w", padx=12, pady=(0, 6))
         ng = ctk.CTkFrame(ntf, fg_color="transparent")
         ng.pack(fill="x", padx=12, pady=(0, 10))
-        ctk.CTkLabel(ng, text="Telegram Token:", font=ctk.CTkFont("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w", pady=3, padx=(0, 8))
-        ctk.CTkEntry(ng, textvariable=self.var_tg_token, width=250, fg_color=C["card"], placeholder_text="123456:ABC...").grid(row=0, column=1, sticky="w", pady=3, padx=(0, 12))
-        ctk.CTkLabel(ng, text="Chat ID:", font=ctk.CTkFont("Segoe UI", 11, "bold")).grid(row=0, column=2, sticky="w", pady=3, padx=(0, 6))
-        ctk.CTkEntry(ng, textvariable=self.var_tg_chat, width=120, fg_color=C["card"], placeholder_text="VD: 987654321").grid(row=0, column=3, sticky="w", pady=3)
-        ctk.CTkLabel(ng, text="Discord Webhook:", font=ctk.CTkFont("Segoe UI", 11, "bold")).grid(row=1, column=0, sticky="w", pady=3, padx=(0, 8))
-        ctk.CTkEntry(ng, textvariable=self.var_dc_webhook, width=440, fg_color=C["card"], placeholder_text="https://discord.com/api/webhooks/...").grid(row=1, column=1, columnspan=3, sticky="w", pady=3)
+        ctk.CTkLabel(ng, text="Discord Webhook:", font=ctk.CTkFont("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w", pady=3, padx=(0, 8))
+        dc_entry = ctk.CTkEntry(ng, textvariable=self.var_dc_webhook, width=460, fg_color=C["card"], placeholder_text="https://discord.com/api/webhooks/...")
+        dc_entry.grid(row=0, column=1, sticky="w", pady=3)
+        dc_entry.bind("<FocusOut>", lambda _e: self._save_all_settings(silent=True))
 
         # --- TAB 3: THỐNG KÊ CẶP LAI ---
         sh = ctk.CTkFrame(tab_stats, fg_color="transparent")
@@ -930,7 +918,7 @@ class DaoRongStudioV10(ctk.CTk):
              "• Bấm nhanh nút 'Cày Bụi' hoặc 'Săn Hiếm' (hoặc vào Luật Rồng gõ 1 câu tiếng Việt cho AI tự cài) → nhấn CTRL + ENTER để chạy!"),
             ("2. Chạy Ngầm & Treo Nhiều Acc không chiếm chuột",
              "• Trong LDPlayer: Cài đặt → Khác → Gỡ lỗi ADB → chọn 'Mở kết nối cục bộ' (chỉ bật 1 lần).\n"
-             "• Chọn 'Chạy Ngầm ADB' trên trang Điều Khiển → bấm 'Quét ADB' → chọn Profile riêng cho từng acc rồi bấm chạy. Bạn có thể thu nhỏ hoặc che cửa sổ game và làm việc khác bình thường."),
+             "• Chọn 'Chạy Ngầm ADB' trên trang Điều Khiển → bấm 'Quét ADB' → tick chọn các acc cần chạy rồi bấm chạy. Bạn có thể thu nhỏ hoặc che cửa sổ game và làm việc khác bình thường."),
             ("3. Tạm dừng, Chạy lại & Bảo vệ an toàn",
              "• CTRL+ENTER: Tạm dừng tại chỗ hoặc Tiếp tục đúng bước đang dở.\n"
              "• Nút 'Chạy lại': Tự đóng bảng, thoát Map (bằng nút Về Đảo) và quay về Đảo Trứng.\n"
@@ -964,7 +952,6 @@ class DaoRongStudioV10(ctk.CTk):
             w.destroy()
         self.adb_device_vars.clear()
         self.adb_device_status_lbls.clear()
-        self.adb_device_profiles.clear()
         self.adb_device_btns.clear()
         self.adb_ctrl.custom_adb_path = self.config_data.get("adb_path", "")
         devices = self.adb_ctrl.list_devices(auto_connect_ports=True)
@@ -975,16 +962,12 @@ class DaoRongStudioV10(ctk.CTk):
                 font=ctk.CTkFont("Segoe UI", 11), text_color=C["amber"],
             ).pack(anchor="w", pady=2)
             return
-        profs = self._list_profiles()
         for dev in devices:
             row = ctk.CTkFrame(self.adb_list_frame, fg_color=C["card"], corner_radius=6)
             row.pack(fill="x", pady=2)
             var = tk.BooleanVar(value=True)
             self.adb_device_vars[dev.serial] = var
             ctk.CTkCheckBox(row, text=dev.label, variable=var, font=ctk.CTkFont("Segoe UI", 11, "bold")).pack(side="left", padx=8, pady=3)
-            pvar = tk.StringVar(value=self.config_data.get("active_profile", "Mặc định"))
-            self.adb_device_profiles[dev.serial] = pvar
-            ctk.CTkOptionMenu(row, variable=pvar, values=profs, width=115, height=22, fg_color=C["console"], button_color=C["card2"], font=ctk.CTkFont("Segoe UI", 10)).pack(side="left", padx=4, pady=3)
             btn_ind = ctk.CTkButton(row, text="▶", width=30, height=22, corner_radius=5, fg_color=C["green"], text_color="#052E16", font=ctk.CTkFont("Segoe UI", 10, "bold"), command=lambda s=dev.serial: self._toggle_single_adb_bot(s))
             btn_ind.pack(side="right", padx=(4, 6), pady=3)
             self.adb_device_btns[dev.serial] = btn_ind
@@ -1345,87 +1328,6 @@ class DaoRongStudioV10(ctk.CTk):
         self.shared_pair_stats.clear()
         self._refresh_pair_stats_ui()
 
-    def _list_profiles(self) -> List[str]:
-        names = ["Mặc định"]
-        if PROFILES_DIR.is_dir():
-            for p in sorted(PROFILES_DIR.glob("*.json")):
-                if p.stem not in names:
-                    names.append(p.stem)
-        return names
-
-    def _load_profile_dict(self, prof_name: str) -> Dict[str, Any]:
-        cfg = dict(self.config_data)
-        if prof_name and prof_name != "Mặc định":
-            p = PROFILES_DIR / f"{prof_name}.json"
-            if p.is_file():
-                try:
-                    cfg.update(json.loads(p.read_text(encoding="utf-8")))
-                except Exception:
-                    pass
-        return cfg
-
-    def _save_new_profile(self) -> None:
-        self._save_all_settings(silent=True)
-        name = simpledialog.askstring("Lưu Profile", "Nhập tên Profile (vd: Cày Bụi, Săn 24★):", parent=self)
-        if not name or not name.strip():
-            return
-        safe = "".join(ch for ch in name.strip() if ch.isalnum() or ch in (" ", "_", "-", "đ", "Đ")).strip()
-        if not safe:
-            return
-        self.config_data["active_profile"] = safe
-        (PROFILES_DIR / f"{safe}.json").write_text(json.dumps(self.config_data, ensure_ascii=False, indent=2), encoding="utf-8")
-        self.combo_profile.configure(values=self._list_profiles())
-        self.var_profile_sel.set(safe)
-        self.append_log(f"Đã lưu Profile '{safe}'.")
-
-    def _load_selected_profile(self) -> None:
-        sel = self.var_profile_sel.get()
-        if sel == "Mặc định":
-            return
-        p = PROFILES_DIR / f"{sel}.json"
-        if not p.is_file():
-            return
-        self.config_data.update(json.loads(p.read_text(encoding="utf-8")))
-        self.config_data["active_profile"] = sel
-        save_config(self.config_data)
-        self.var_win_title.set(self.config_data.get("window_title_keyword", "AUTO"))
-        self.var_p1.set(self.config_data.get("selected_parent_1") or "(Chưa có mẫu)")
-        self.var_p2.set(self.config_data.get("selected_parent_2") or "(Chưa có mẫu)")
-        self.var_bot_mode_vn.set(self._mode_to_vn.get(self.config_data.get("bot_mode", "breed_and_dust"), "Lai + Hóa Bụi"))
-        self.var_ctrl_mode_vn.set(self._ctrl_to_vn.get(self.config_data.get("control_mode", "windows"), "Chuột chính"))
-        self.var_unknown_vn.set(self._unk_map_to_vn.get(self.config_data.get("unknown_dragon_action", "keep"), "Cất"))
-        self.var_speed_vn.set(self._spd_to_vn.get(self.config_data.get("speed_preset", "fast"), "Nhanh"))
-        self.var_hops.set(str(self.config_data.get("island_hops", 2)))
-        self.var_dust_max_star.set(str(self.config_data.get("dust_max_star", 0)))
-        self.var_watchdog_sec.set(str(self.config_data.get("watchdog_seconds", 180)))
-        self.var_adb_path.set(self.config_data.get("adb_path", ""))
-        self.var_dust_only_session.set(bool(self.config_data.get("dust_only_session_bred", True)))
-        self.var_watchdog_relaunch.set(bool(self.config_data.get("watchdog_relaunch", True)))
-        self.var_remote_notify.set(bool(self.config_data.get("enable_remote_notify", False)))
-        self.var_tg_token.set(str(self.config_data.get("telegram_token", "")))
-        self.var_tg_chat.set(str(self.config_data.get("telegram_chat_id", "")))
-        self.var_dc_webhook.set(str(self.config_data.get("discord_webhook", "")))
-        saved_dr = set(self.config_data.get("dust_rarities", ["Nguyên Liệu"]))
-        for r_k, r_v in self.var_dust_rars.items():
-            r_v.set(r_k in saved_dr)
-        as_c = self.config_data.get("auto_stop", {})
-        self.var_as_enabled.set(bool(as_c.get("enabled", False)))
-        self.var_as_mins.set(str(as_c.get("max_minutes", 0)))
-        self.var_as_breeds.set(str(as_c.get("max_breeds", 0)))
-        self.var_as_rare.set(str(as_c.get("stop_on_rare_count", 0)))
-        self.var_as_epic.set(bool(as_c.get("stop_on_epic_or_event", False)))
-        self.adb_ctrl.custom_adb_path = self.var_adb_path.get().strip()
-        self._refresh_all_lists()
-        self.append_log(f"Đã tải Profile '{sel}'.")
-
-    def _delete_selected_profile(self) -> None:
-        sel = self.var_profile_sel.get()
-        if sel == "Mặc định":
-            return
-        (PROFILES_DIR / f"{sel}.json").unlink(missing_ok=True)
-        self.combo_profile.configure(values=self._list_profiles())
-        self.var_profile_sel.set("Mặc định")
-
     def _toggle_mini_hud(self) -> None:
         if self._mini_hud is not None and self._mini_hud.winfo_exists():
             self._mini_hud.destroy()
@@ -1508,8 +1410,6 @@ class DaoRongStudioV10(ctk.CTk):
         self.config_data["collect_ai_dataset"] = bool(self.var_collect_ai.get())
         self.config_data["watchdog_relaunch"] = bool(self.var_watchdog_relaunch.get())
         self.config_data["enable_remote_notify"] = bool(self.var_remote_notify.get())
-        self.config_data["telegram_token"] = self.var_tg_token.get().strip()
-        self.config_data["telegram_chat_id"] = self.var_tg_chat.get().strip()
         self.config_data["discord_webhook"] = self.var_dc_webhook.get().strip()
         self.config_data["auto_stop"] = {
             "enabled": bool(self.var_as_enabled.get()),
@@ -1578,10 +1478,10 @@ class DaoRongStudioV10(ctk.CTk):
                 if btn:
                     btn.configure(text="▶", fg_color=C["green"], text_color="#052E16")
             return
-        prof = self.adb_device_profiles[serial].get() if serial in self.adb_device_profiles else "Mặc định"
-        acc_cfg = self._load_profile_dict(prof)
+        self._save_all_settings(silent=True)
+        acc_cfg = dict(self.config_data)
         if not acc_cfg.get("selected_parent_1") or not acc_cfg.get("selected_parent_2"):
-            messagebox.showwarning("Thiếu rồng bố mẹ", f"Profile '{prof}' chưa chọn đủ 2 rồng bố mẹ!")
+            messagebox.showwarning("Thiếu rồng bố mẹ", "Bạn chưa chọn đủ 2 rồng bố mẹ!")
             return
         lbl = f"ADB {serial}"
         bot = DaoRongBot(
@@ -1606,21 +1506,18 @@ class DaoRongStudioV10(ctk.CTk):
             if not sels:
                 messagebox.showwarning("Chưa chọn thiết bị ADB", "Hãy bấm 'Quét ADB' và tick ít nhất 1 giả lập!")
                 return
-            acc_configs: List[Tuple[str, str, Dict[str, Any]]] = []
-            for serial in sels:
-                prof = self.adb_device_profiles[serial].get() if serial in self.adb_device_profiles else "Mặc định"
-                acc_cfg = self._load_profile_dict(prof)
-                ap1 = acc_cfg.get("selected_parent_1", "")
-                ap2 = acc_cfg.get("selected_parent_2", "")
-                if not ap1 or not ap2:
-                    messagebox.showwarning("Thiếu rồng bố mẹ", f"Thiết bị {serial} (Profile '{prof}') chưa chọn đủ 2 rồng bố mẹ!")
-                    return
-                if ap1 == ap2:
-                    messagebox.showwarning("Trùng cặp rồng bố mẹ", f"Thiết bị {serial} (Profile '{prof}') đang chọn trùng 2 rồng bố mẹ!")
-                    return
-                acc_configs.append((serial, prof, acc_cfg))
+            acc_cfg_base = dict(self.config_data)
+            ap1 = acc_cfg_base.get("selected_parent_1", "")
+            ap2 = acc_cfg_base.get("selected_parent_2", "")
+            if not ap1 or not ap2:
+                messagebox.showwarning("Thiếu rồng bố mẹ", "Bạn chưa chọn đủ 2 rồng bố mẹ!")
+                return
+            if ap1 == ap2:
+                messagebox.showwarning("Trùng cặp rồng bố mẹ", "Đang chọn trùng 2 rồng bố mẹ!")
+                return
             self.multi_bots.clear()
-            for idx, (serial, prof, acc_cfg) in enumerate(acc_configs, 1):
+            for idx, serial in enumerate(sels, 1):
+                acc_cfg = dict(acc_cfg_base)
                 lbl = f"Acc #{idx} ({serial})"
                 bot = DaoRongBot(
                     BASE_DIR, acc_cfg,
@@ -1684,7 +1581,7 @@ class DaoRongStudioV10(ctk.CTk):
             tag = "warn"
         elif any(k in msg for k in ("Lai ra:", "Chúc phúc", "HOÀN THÀNH", "Xong", "✨", "⚡")):
             tag = "ok"
-        max_lines = int(self.config_data.get("max_log_lines", 500))
+        max_lines = int(self.config_data.get("max_log_lines", 250))
 
         def _ins() -> None:
             self.txt_log.configure(state=tk.NORMAL)
@@ -1825,8 +1722,9 @@ class DaoRongStudioV10(ctk.CTk):
         info = self._pending_update_info
         if not info:
             return
-        if not messagebox.askyesno("Cập nhật bản mới", f"Tải và cập nhật lên v{info.latest_version} ngay?\n(Toàn bộ rồng bố mẹ, luật rồng và Profile sẽ được giữ nguyên)", parent=self):
+        if not messagebox.askyesno("Cập nhật bản mới", f"Tải và cập nhật lên v{info.latest_version} ngay?\n(Toàn bộ rồng bố mẹ, luật rồng và link Discord sẽ được giữ nguyên)", parent=self):
             return
+        self._save_all_settings(silent=True)
         self.on_stop_all()
         win = ctk.CTkToplevel(self)
         win.title("Đang cập nhật...")
@@ -1861,8 +1759,6 @@ class DaoRongStudioV10(ctk.CTk):
     def _test_remote_notify(self) -> None:
         self._save_all_settings(silent=True)
         ntf = AlertNotifier(
-            telegram_token=self.var_tg_token.get().strip(),
-            telegram_chat_id=self.var_tg_chat.get().strip(),
             discord_webhook=self.var_dc_webhook.get().strip(),
             enabled=True,
         )

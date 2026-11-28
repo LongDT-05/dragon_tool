@@ -64,11 +64,13 @@ class YoloLevel2Vision:
         self.classes: List[str] = list(DEFAULT_CLASSES)
         self._session = None
         self._input_name: str = ""
+        self._load_failed: bool = False
         self.ready: bool = False
         self.status_text: str = "Chưa có model AI Cấp 2 (đang dùng AI Cấp 1)"
-        self._load()
+        self._prepare_metadata()
 
-    def _load(self) -> None:
+    def _prepare_metadata(self) -> None:
+        """Chỉ kiểm tra file model & classes lúc khởi động (Lazy-load: chỉ nạp ONNX vào RAM khi thật sự cần)."""
         if self.classes_path.is_file():
             try:
                 loaded = json.loads(self.classes_path.read_text(encoding="utf-8"))
@@ -87,20 +89,32 @@ class YoloLevel2Vision:
             self.status_text = "Thiếu onnxruntime (đang dùng AI Cấp 1)"
             return
 
+        self.ready = True
+        self.status_text = f"AI Cấp 2 YOLOv8-nano SẴN SÀNG ({len(self.classes)} lớp · Tiết kiệm RAM)"
+
+    def _ensure_session(self) -> bool:
+        if self._session is not None:
+            return True
+        if not self.ready or self._load_failed or ort is None or not self.model_path.is_file():
+            return False
         try:
             sess_opt = ort.SessionOptions()
             sess_opt.intra_op_num_threads = 2
+            sess_opt.inter_op_num_threads = 1
+            sess_opt.enable_cpu_mem_arena = False
+            sess_opt.enable_mem_pattern = False
             self._session = ort.InferenceSession(
                 str(self.model_path),
                 sess_options=sess_opt,
                 providers=["CPUExecutionProvider"],
             )
             self._input_name = self._session.get_inputs()[0].name
-            self.ready = True
-            self.status_text = f"AI Cấp 2 YOLOv8-nano SẴN SÀNG ({len(self.classes)} lớp)"
+            return True
         except Exception as exc:
+            self._load_failed = True
             self.ready = False
             self.status_text = f"Lỗi nạp ONNX: {exc}"
+            return False
 
     def _letterbox(self, img_bgr: np.ndarray) -> Tuple[np.ndarray, float, int, int]:
         h, w = img_bgr.shape[:2]
@@ -119,7 +133,7 @@ class YoloLevel2Vision:
     def detect(
         self, img_bgr: np.ndarray, conf_thr: float = 0.45, iou_thr: float = 0.45
     ) -> List[YoloDetection]:
-        if not self.ready or self._session is None or img_bgr is None or img_bgr.size == 0:
+        if not self.ready or img_bgr is None or img_bgr.size == 0 or not self._ensure_session():
             return []
         blob, scale, pad_x, pad_y = self._letterbox(img_bgr)
         outputs = self._session.run(None, {self._input_name: blob})

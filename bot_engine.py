@@ -1396,6 +1396,8 @@ class DaoRongBot:
                     self.stats.breeds += 1
                     self._breed_counted_for_cycle = True
                     self.on_stats(self.stats)
+                    if self.stats.breeds % 20 == 0:
+                        gc.collect()
                 return BotState.CLASSIFY_AND_ACT
 
             time.sleep(0.035)
@@ -2250,6 +2252,7 @@ class DaoRongBot:
             else:
                 bottom_hit_count = 0
 
+        gc.collect()
         return BotState.RETURN_TO_EGG_ISLAND
 
     # ------------------------------------------------------------------
