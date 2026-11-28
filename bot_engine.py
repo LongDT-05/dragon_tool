@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from actions import InputController
-from ocr_engine import DragonTextMatcher, load_dragon_catalog, normalize_vn
+from ocr_engine import extract_stars, DragonTextMatcher, load_dragon_catalog, normalize_vn
 import random
 from notifier import AlertNotifier
 from smart_ai import (
