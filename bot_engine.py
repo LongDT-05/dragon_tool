@@ -997,6 +997,8 @@ class DaoRongBot:
         thr = 0.79 if self.vision.is_adb_mode else max(0.82, self._conf("dragon", 0.75))
 
         scr0, rect0 = self.vision.capture_window()
+        if self._check_bag_full(scr0, rect0):
+            return False
         l_emp0, r_emp0 = self._count_empty_parent_slots(scr0, rect0)
         slots_needed = int(l_emp0) + int(r_emp0)
         if slots_needed == 0:
@@ -1089,7 +1091,7 @@ class DaoRongBot:
                 l_before, r_before = self._count_empty_parent_slots(cur_scr, cur_rct)
                 patch_before = _card_patch(cur_scr, cur_rct, res.x, res.y)
                 self.log(f"⚡ [CHỌN RỒNG] Thấy {label} ({pp.stem}, {res.score:.2f}) -> Click ngay.")
-                self.input.click(res.x, res.y, post_delay=0.22 * self._spd, stop_check=self.should_stop)
+                self.input.click(res.x, res.y, post_delay=0.14 * self._spd, stop_check=self.should_stop)
 
                 # Chụp lại có giới hạn (tối đa 3 nhịp) để đợi ảnh ADB cập nhật kịp ô bố mẹ sau cú chạm!
                 entered_slot = 0
@@ -1132,7 +1134,7 @@ class DaoRongBot:
                         picked_count = len(verified_slots)
                         if need and not self.should_stop():
                             # Đợi thanh rồng trượt ổn định sau khi rút 1 con lên ô để bắt ngay con thứ 2 nếu nằm sát bên!
-                            self.input.sleep_interruptible(max(0.38, 0.40 * self._spd), self.should_stop)
+                            self.input.sleep_interruptible(max(0.24, 0.28 * self._spd), self.should_stop)
                             cur_scr, cur_rct = self.vision.capture_window()
                 elif not patch_changed:
                     # Click không ăn -> thử lại 1 nhịp
@@ -1250,8 +1252,6 @@ class DaoRongBot:
         self._breed_counted_for_cycle = False
         self._pair_stats_recorded_for_cycle = False
         self._drop_recorded_for_cycle = False
-        if self._check_bag_full():
-            return BotState.EXIT_BREED_TO_DUST
 
         p1 = self.config.get("selected_parent_1", "")
         p2 = self.config.get("selected_parent_2", "")
@@ -1457,7 +1457,11 @@ class DaoRongBot:
                 sw_cut = max(12, int(nc_now.shape[1] * 0.60))
                 if float(cv2.matchTemplate(nc_pre[:, sw_cut:], nc_now[:, sw_cut:], cv2.TM_CCOEFF_NORMED)[0, 0]) < 0.96:
                     star_ok = False
-            if star_ok and c_stars is not None:
+            need_star_verify = any(
+                any(ch.isdigit() for ch in str(r))
+                for r in (text_rules.get("bless", ""), text_rules.get("keep", ""), text_rules.get("sell", ""))
+            )
+            if star_ok and c_stars is not None and need_star_verify:
                 if not self.text_matcher.is_available:
                     star_ok = False
                 else:
@@ -1485,8 +1489,12 @@ class DaoRongBot:
             mem_hit = self.name_cache.match(name_crop, res_key, threshold=0.89)
             if mem_hit is not None:
                 c_name, c_rar, c_stars, c_sc = mem_hit
+                need_star_verify2 = any(
+                    any(ch.isdigit() for ch in str(r))
+                    for r in (text_rules.get("bless", ""), text_rules.get("keep", ""), text_rules.get("sell", ""))
+                )
                 star_verified = True
-                if c_stars is not None:
+                if c_stars is not None and need_star_verify2:
                     if not self.text_matcher.is_available:
                         star_verified = False
                         self.log_tech(f"[AI CACHE] Từ chối mẫu nhớ {c_stars}★ vì OCR không khả dụng để xác minh sao!")
@@ -1698,9 +1706,6 @@ class DaoRongBot:
         if self.is_paused or self.should_stop():
             return BotState.SELECT_PARENTS
 
-        self.input.sleep_interruptible(0.12 * self._spd, self.should_stop)
-        if self._check_bag_full():
-            return BotState.EXIT_BREED_TO_DUST
         if keep_succeeded:
             self._keep_retry_count = 0
         elif action == "keep" and not self.should_stop():
@@ -1717,8 +1722,7 @@ class DaoRongBot:
         self._breed_counted_for_cycle = False
         self._pair_stats_recorded_for_cycle = False
         self._drop_recorded_for_cycle = False
-        if self._check_bag_full():
-            return BotState.EXIT_BREED_TO_DUST
+        self.input.sleep_interruptible(0.08 * self._spd, self.should_stop)
         return BotState.SELECT_PARENTS
 
     def _check_auto_stop_conditions(self, id_name: str, id_rarity: str, id_stars: Optional[int]) -> None:
