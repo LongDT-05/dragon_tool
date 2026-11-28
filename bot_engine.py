@@ -929,6 +929,30 @@ class DaoRongBot:
             bad = ([1] if s12 < 0.74 else []) + ([2] if s21 < 0.74 else [])
         return (len(bad) == 0), bad
 
+    def _detect_bottom_bar_edge_gap(
+        self, scr: np.ndarray, rect: WindowRect, side: str
+    ) -> Tuple[bool, float, float, float]:
+        """
+        Nhận diện khoảng trống nền xanh đậm ở mép trái (đầu thanh rồng) hoặc mép phải (cuối thanh rồng).
+        - Mép trái (side='left'): vùng [0.195, 0.690, 0.242, 0.830] trên khung game 1280x720.
+        - Mép phải (side='right'): vùng [0.485, 0.690, 0.535, 0.830] trên khung game 1280x720.
+        Trả về: (is_empty_gap, bright_frac, sat_frac, lap_var).
+        """
+        if scr is None or scr.size == 0:
+            return False, 1.0, 1.0, 9999.0
+        base_roi = [0.195, 0.690, 0.242, 0.830] if side == "left" else [0.485, 0.690, 0.535, 0.830]
+        adj_roi = self.vision.adjust_rel_roi(base_roi, rect) if hasattr(self.vision, "adjust_rel_roi") else base_roi
+        patch, _, _ = self.vision.crop_roi(scr, rect, adj_roi)
+        if patch is None or patch.size == 0 or patch.shape[0] < 10 or patch.shape[1] < 10:
+            return False, 1.0, 1.0, 9999.0
+        hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+        bright_frac = float((hsv[:, :, 2] > 115).mean())
+        sat_frac = float((hsv[:, :, 1] > 125).mean())
+        gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+        lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        is_gap = (bright_frac < 0.12) and (sat_frac < 0.13) and (lap_var < 260.0)
+        return is_gap, bright_frac, sat_frac, lap_var
+
     def _select_parents_dual_fast(self, p1_path: Path, p2_path: Path) -> bool:
         """
         Chọn 2 rồng bố mẹ CHUẨN XÁC (Winner-Takes-All + Patch-Gone + HSV Color Guard):
@@ -941,8 +965,9 @@ class DaoRongBot:
         roi = self._drag_cfg("bottom_bar_roi", [0.15, 0.62, 0.61, 0.89])
         rx1, ry1, rx2, ry2 = float(roi[0]), float(roi[1]), float(roi[2]), float(roi[3])
         mid_y = (ry1 + ry2) / 2.0
-        raw_s = self._drag_cfg("bottom_drag_start", [0.48, mid_y])
-        raw_e = self._drag_cfg("bottom_drag_end", [0.24, mid_y])
+        # Quãng kéo ~3.55 thẻ (0.505 -> 0.195) kèm kéo chậm triệt tiêu quán tính để 4 thẻ kế tiếp nằm ngay ngắn
+        raw_s = self._drag_cfg("bottom_drag_start", [0.505, mid_y])
+        raw_e = self._drag_cfg("bottom_drag_end", [0.195, mid_y])
         def _clamp_pt(pt):
             return [
                 max(rx1 + 0.01, min(rx2 - 0.01, float(pt[0]))),
@@ -959,10 +984,16 @@ class DaoRongBot:
                 end_rel[0] = rx1 + pad
             else:
                 can_swipe = False
-        full_limit = max(1, int(self._drag_cfg("max_parent_scrolls", 24)))
-        drag_dur = 0.42 * self._spd
-        hold_end = 0.12
-        settle = 0.30 * self._spd
+        full_limit = max(1, int(self._drag_cfg("max_parent_scrolls", 40)))
+        if self.vision.is_adb_mode:
+            # Kéo chậm (~1.2s) để triệt tiêu quán tính cuộn lố trên Android ScrollView, chờ 0.60s đứng khung hẳn rồi mới quét
+            drag_dur = 1.05 * self._spd
+            hold_end = 0.15
+            settle = 0.60 * self._spd
+        else:
+            drag_dur = 0.65 * self._spd
+            hold_end = 0.18
+            settle = 0.35 * self._spd
         thr = 0.79 if self.vision.is_adb_mode else max(0.82, self._conf("dragon", 0.75))
 
         scr0, rect0 = self.vision.capture_window()
@@ -1140,6 +1171,9 @@ class DaoRongBot:
 
         for dir_code, dir_name, p_from, p_to, limit in directions:
             stuck_count = 0
+            edge_side = "right" if dir_code == "right" else "left"
+            init_gap, _, _, _ = self._detect_bottom_bar_edge_gap(prev_scr, prev_rect, edge_side)
+            edge_gap_hits = 1 if init_gap else 0
             for step in range(1, limit + 1):
                 if picked_count >= 2 or not need:
                     return True
@@ -1171,9 +1205,27 @@ class DaoRongBot:
                         return True
                     return False
 
-                if compute_frame_diff(before_roi, after_roi) < 1.2:
+                bar_diff = compute_frame_diff(before_roi, after_roi)
+                has_gap, g_br, g_sat, g_lap = self._detect_bottom_bar_edge_gap(after_scr, after_rect, edge_side)
+                if has_gap:
+                    edge_gap_hits += 1
+                    self.log_tech(
+                        f"[THANH RỒNG] Thấy khoảng trống mép {'phải' if edge_side == 'right' else 'trái'} "
+                        f"({edge_gap_hits}/2 | br={g_br:.2f}, sat={g_sat:.2f}, lap={g_lap:.0f})."
+                    )
+                    if edge_gap_hits >= 2 or bar_diff < 2.5:
+                        self.log(
+                            f"⚡ [THANH RỒNG] Đã kéo hết mép {'phải' if edge_side == 'right' else 'trái'} "
+                            f"(nhận diện khoảng trống sau {step} nhịp) -> Đổi chiều quét!"
+                        )
+                        break
+                else:
+                    edge_gap_hits = 0
+
+                if bar_diff < 1.2:
                     stuck_count += 1
-                    if stuck_count >= 3:
+                    if stuck_count >= 2:
+                        self.log_tech(f"[THANH RỒNG] Thanh rồng không dịch chuyển thêm ({stuck_count}/2) -> Đổi chiều quét.")
                         break
                 else:
                     stuck_count = 0
