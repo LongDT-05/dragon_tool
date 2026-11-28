@@ -9,11 +9,14 @@ main.py - DaoRong_tool v10.3 (Giao diện Studio 2026 — Gọn, Không Bóp Ch�
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
+import tempfile
 import threading
 import tkinter as tk
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
@@ -87,6 +90,8 @@ ACCURACY_PRESETS = {
     "Chuẩn": {"button": 0.76, "nav_button": 0.72, "dragon": 0.75, "dragon_name": 0.85, "bag_full": 0.78, "nguyen_lieu": 0.70},
     "Chặt": {"button": 0.82, "nav_button": 0.78, "dragon": 0.82, "dragon_name": 0.90, "bag_full": 0.84, "nguyen_lieu": 0.76},
 }
+DUST_RARITIES = ("Phổ biến", "Nguyên Liệu", "Hiếm", "Cực hiếm", "Event")
+NO_PARENT_SAMPLE = "(Chưa có mẫu)"
 
 REQUIRED_UI_TEMPLATES = [
     ("btn_egg.png", "Quả trứng ở đảo lai", True),
@@ -119,43 +124,137 @@ def ensure_directories() -> None:
     PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def load_config() -> Dict[str, Any]:
-    cfg: Dict[str, Any] = {}
-    if CONFIG_PATH.is_file():
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    cfg = loaded
-        except Exception:
-            try:
-                CONFIG_PATH.replace(CONFIG_PATH.with_suffix(".json.corrupt.bak"))
-            except Exception:
-                pass
-            cfg = {}
-    if not isinstance(cfg.get("dragon_text_rules"), dict):
-        cfg["dragon_text_rules"] = {"bless": [], "keep": [], "sell": []}
-    for k in ("bless", "keep", "sell"):
-        if not isinstance(cfg["dragon_text_rules"].get(k), list):
-            cfg["dragon_text_rules"][k] = []
-    for dict_k in ("drag", "timing", "timings", "auto_stop", "confidence"):
+def _nonnegative_int(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError("Cần số nguyên không âm")
+    number = int(value)
+    if number < 0:
+        raise ValueError("Cần số nguyên không âm")
+    return number
+
+
+def _config_object(path: Path) -> Dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError("Tệp cấu hình phải chứa một đối tượng JSON.")
+    return data
+
+
+def _finite_config_number(value: Any) -> bool:
+    return (type(value) is int and abs(value) <= 2**53) or (type(value) is float and math.isfinite(value))
+
+
+def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = dict(cfg)
+    for dict_k in ("drag", "drag_settings", "timing", "timings", "auto_stop", "confidence", "pins", "dragon_text_rules"):
         if dict_k in cfg and not isinstance(cfg.get(dict_k), dict):
             cfg[dict_k] = {}
-    cfg.setdefault("accuracy_mode", "Chuẩn")
-    cfg.setdefault("bot_mode", "breed_and_dust")
-    cfg.setdefault("control_mode", "windows")
-    cfg.setdefault("dust_rarities", ["Nguyên Liệu"])
-    cfg.setdefault("dust_only_session_bred", True)
-    cfg.setdefault("human_like_input", True)
-    cfg.setdefault("human_break_enabled", True)
-    cfg.setdefault("save_rare_snapshots", True)
-    cfg.setdefault("sound_alert", True)
-    cfg.setdefault("verbose_log", False)
+    rules = cfg.get("dragon_text_rules", {})
+    cfg["dragon_text_rules"] = {
+        key: [rule for rule in rules[key] if isinstance(rule, str) and rule.strip()]
+        if isinstance(rules.get(key), list) else []
+        for key in ("bless", "keep", "sell")
+    }
+    for key, options in (
+        ("accuracy_mode", ("Chuẩn", "Thoáng", "Chặt")),
+        ("bot_mode", ("breed_and_dust", "breed_only")),
+        ("control_mode", ("windows", "adb")),
+        ("speed_preset", ("fast", "balanced", "safe")),
+        ("unknown_dragon_action", ("keep", "pause", "sell")),
+    ):
+        if cfg.get(key) not in options:
+            cfg[key] = options[0]
+    rarities = cfg.get("dust_rarities", ["Nguyên Liệu"])
+    cfg["dust_rarities"] = [rarity for rarity in DUST_RARITIES if rarity in rarities] if isinstance(rarities, list) else []
+    for key, default in (
+        ("window_title_keyword", "AUTO"), ("selected_parent_1", ""), ("selected_parent_2", ""),
+        ("adb_path", ""), ("update_manifest_url", ""), ("active_profile", "Mặc định"),
+        ("telegram_token", ""), ("telegram_chat_id", ""), ("discord_webhook", ""),
+    ):
+        value = cfg.get(key, default)
+        cfg[key] = value if isinstance(value, str) else default
+    for key, default in (("island_hops", 2), ("dust_max_star", 0), ("watchdog_seconds", 180), ("max_log_lines", 500)):
+        try:
+            cfg[key] = _nonnegative_int(cfg.get(key, default))
+        except ValueError:
+            cfg[key] = default
+            if key == "dust_max_star":
+                cfg["dust_rarities"] = []
+    auto_stop = dict(cfg.get("auto_stop", {}))
+    for key in ("max_minutes", "max_breeds", "stop_on_rare_count"):
+        try:
+            auto_stop[key] = _nonnegative_int(auto_stop.get(key, 0))
+        except ValueError:
+            auto_stop[key] = 0
+    for key in ("enabled", "stop_on_epic_or_event"):
+        if not isinstance(auto_stop.get(key), bool):
+            auto_stop[key] = False
+    cfg["auto_stop"] = auto_stop
+    if "ui_reference_window_size" not in cfg and "reference_window_size" in cfg:
+        cfg["ui_reference_window_size"] = cfg["reference_window_size"]
+    for key, default in (("ui_reference_window_size", [1330, 761]), ("dragon_reference_window_size", [0, 0])):
+        try:
+            size = cfg.get(key, default)
+            if not isinstance(size, (list, tuple)):
+                raise ValueError("Kích thước phải có chiều rộng và chiều cao")
+            width, height = size
+            cfg[key] = [_nonnegative_int(width), _nonnegative_int(height)]
+        except (ValueError, TypeError):
+            cfg[key] = default
+
+    for key, default in (
+        ("dust_only_session_bred", True), ("human_like_input", True), ("human_break_enabled", True),
+        ("save_rare_snapshots", True), ("sound_alert", True), ("auto_check_update", True),
+        ("watchdog_relaunch", True), ("use_color_check", True), ("auto_scale_templates", True),
+        ("enable_text_ocr", True), ("verbose_log", False), ("collect_ai_dataset", False),
+        ("enable_remote_notify", False),
+    ):
+        if not isinstance(cfg.get(key), bool):
+            cfg[key] = default
+
+    for key in ("timings", "timing", "confidence"):
+        if key in cfg:
+            cfg[key] = {
+                name: value for name, value in cfg[key].items()
+                if _finite_config_number(value) and value >= 0 and (key != "confidence" or 0 < value <= 1)
+            }
+    for key in ("drag_settings", "drag", "pins"):
+        if key not in cfg:
+            continue
+        settings = {}
+        for name, value in cfg[key].items():
+            if name.endswith(("_roi", "_drag_start", "_drag_end", "_rel")):
+                length = 4 if name.endswith("_roi") else 2
+                if not isinstance(value, list) or len(value) != length or not all(_finite_config_number(v) for v in value):
+                    continue
+                if length == 4 and not (0 <= value[0] < value[2] <= 1 and 0 <= value[1] < value[3] <= 1):
+                    continue
+            elif not _finite_config_number(value) or value < 0:
+                continue
+            settings[name] = value
+        cfg[key] = settings
+    return cfg
+
+
+def load_config() -> Dict[str, Any]:
+    loaded: Dict[str, Any] = {}
+    can_save = True
+    if CONFIG_PATH.is_file():
+        try:
+            loaded = _config_object(CONFIG_PATH)
+        except OSError:
+            can_save = False
+        except ValueError:
+            try:
+                CONFIG_PATH.replace(CONFIG_PATH.with_suffix(".json.corrupt.bak"))
+            except OSError:
+                can_save = False
+    cfg = _normalize_config(loaded)
     # Tự động nâng cấp thông số vuốt thanh rồng & khung quét cho người dùng nâng từ bản cũ (< v11.0)
     # mà vẫn giữ nguyên 100% luật rồng, cặp bố mẹ, ghim tọa độ và hồ sơ!
     try:
         _schema_v = int(cfg.get("config_schema_version", 0) or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         _schema_v = 0
     if _schema_v < 12:
         drag = cfg.setdefault("drag", {})
@@ -173,16 +272,37 @@ def load_config() -> Dict[str, Any]:
     if _schema_v < 13:
         cfg["ui_reference_window_size"] = [1330, 761]
         cfg["config_schema_version"] = 13
+    # Các phiên bản cũ dùng drag/timing. Bot hiện đọc drag_settings/timings.
+    # Ưu tiên vùng và thời gian đã hiệu chỉnh theo các khóa hiện tại.
+    for old, current in (("drag", "drag_settings"), ("timing", "timings")):
+        cfg[current] = {**cfg.get(old, {}), **cfg.get(current, {})}
+    if _schema_v < 13 and can_save:
         try:
             save_config(cfg)
-        except Exception:
+        except OSError:
             pass
     return cfg
 
 
-def save_config(cfg: Dict[str, Any]) -> None:
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+def save_config(cfg: Dict[str, Any], path: Optional[Path] = None) -> None:
+    path = CONFIG_PATH if path is None else path
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.",
+            suffix=".tmp", delete=False,
+        ) as f:
+            temp_path = Path(f.name)
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        temp_path.replace(path)
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 class DaoRongStudioV10(ctk.CTk):
@@ -235,11 +355,13 @@ class DaoRongStudioV10(ctk.CTk):
 
         self._build_layout()
         self._refresh_all_lists()
+        self._show_control_panel()
+        if self.config_data.get("control_mode") == "adb":
+            self.after(0, self._scan_adb_devices)
         self._show_page("dashboard")
         self._register_hotkeys()
         self._poll_emulator_status()
-        if self.config_data.get("auto_check_update", True):
-            self.after(3000, self._periodic_update_check)
+        self.after(3000, self._periodic_update_check)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ------------------------------------------------------------------
@@ -523,9 +645,6 @@ class DaoRongStudioV10(ctk.CTk):
         )
         self.lb_rare_drops.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        self._on_mode_changed()
-        self._on_ctrl_mode_changed()
-
         # --- HÀNG 3: NHẬT KÝ HOẠT ĐỘNG (FULL WIDTH, SẠCH ĐẸP) ---
         log_card = ctk.CTkFrame(page, corner_radius=12, fg_color=C["card"], border_width=1, border_color=C["border"])
         log_card.pack(fill="both", expand=True)
@@ -801,7 +920,7 @@ class DaoRongStudioV10(ctk.CTk):
         ctk.CTkLabel(r_dr, text="Độ hiếm Hóa Bụi:", font=ctk.CTkFont("Segoe UI", 12, "bold"), text_color=C["text"]).pack(side="left", padx=(0, 10))
         saved_dr = set(self.config_data.get("dust_rarities", ["Nguyên Liệu"]))
         self.var_dust_rars: Dict[str, tk.BooleanVar] = {}
-        for r_lbl in ("Phổ biến", "Nguyên Liệu", "Hiếm", "Cực hiếm", "Event"):
+        for r_lbl in DUST_RARITIES:
             v = tk.BooleanVar(value=(r_lbl in saved_dr))
             self.var_dust_rars[r_lbl] = v
             ctk.CTkCheckBox(r_dr, text=r_lbl, variable=v, width=90, font=ctk.CTkFont("Segoe UI", 11)).pack(side="left", padx=(0, 6))
@@ -946,27 +1065,34 @@ class DaoRongStudioV10(ctk.CTk):
     # ------------------------------------------------------------------
     def _on_mode_changed(self) -> None:
         m = self._mode_from_vn.get(self.var_bot_mode_vn.get(), "breed_and_dust")
-        self.config_data["bot_mode"] = m
-        save_config(self.config_data)
+        if not self._persist_settings({**self.config_data, "bot_mode": m}):
+            self.var_bot_mode_vn.set(self._mode_to_vn[self.config_data["bot_mode"]])
 
     def _on_ctrl_mode_changed(self) -> None:
         c = self._ctrl_from_vn.get(self.var_ctrl_mode_vn.get(), "windows")
-        self.config_data["control_mode"] = c
-        save_config(self.config_data)
-        if c == "adb":
-            self.adb_panel.pack(fill="x", padx=12, pady=(0, 6))
+        if not self._persist_settings({**self.config_data, "control_mode": c}):
+            self.var_ctrl_mode_vn.set(self._ctrl_to_vn[self.config_data["control_mode"]])
+            return
+        self._show_control_panel()
+        if c == "adb" and not self.adb_device_vars:
             self._scan_adb_devices()
+
+    def _show_control_panel(self) -> None:
+        if self.config_data.get("control_mode") == "adb":
+            self.adb_panel.pack(fill="x", padx=12, pady=(0, 6))
         else:
             self.adb_panel.pack_forget()
 
     def _scan_adb_devices(self) -> None:
+        selections = {serial: var.get() for serial, var in self.adb_device_vars.items()}
+        profiles = {serial: var.get() for serial, var in self.adb_device_profiles.items()}
         for w in self.adb_list_frame.winfo_children():
             w.destroy()
         self.adb_device_vars.clear()
         self.adb_device_status_lbls.clear()
         self.adb_device_profiles.clear()
         self.adb_device_btns.clear()
-        self.adb_ctrl.custom_adb_path = self.config_data.get("adb_path", "")
+        self.adb_ctrl.custom_adb_path = self.var_adb_path.get().strip()
         devices = self.adb_ctrl.list_devices(auto_connect_ports=True)
         if not devices:
             ctk.CTkLabel(
@@ -979,13 +1105,18 @@ class DaoRongStudioV10(ctk.CTk):
         for dev in devices:
             row = ctk.CTkFrame(self.adb_list_frame, fg_color=C["card"], corner_radius=6)
             row.pack(fill="x", pady=2)
-            var = tk.BooleanVar(value=True)
+            var = tk.BooleanVar(value=selections.get(dev.serial, True))
             self.adb_device_vars[dev.serial] = var
             ctk.CTkCheckBox(row, text=dev.label, variable=var, font=ctk.CTkFont("Segoe UI", 11, "bold")).pack(side="left", padx=8, pady=3)
-            pvar = tk.StringVar(value=self.config_data.get("active_profile", "Mặc định"))
+            profile = profiles.get(dev.serial, self.config_data.get("active_profile", "Mặc định"))
+            pvar = tk.StringVar(value=profile if profile in profs else "Mặc định")
             self.adb_device_profiles[dev.serial] = pvar
             ctk.CTkOptionMenu(row, variable=pvar, values=profs, width=115, height=22, fg_color=C["console"], button_color=C["card2"], font=ctk.CTkFont("Segoe UI", 10)).pack(side="left", padx=4, pady=3)
-            btn_ind = ctk.CTkButton(row, text="▶", width=30, height=22, corner_radius=5, fg_color=C["green"], text_color="#052E16", font=ctk.CTkFont("Segoe UI", 10, "bold"), command=lambda s=dev.serial: self._toggle_single_adb_bot(s))
+            bot = self.multi_bots.get(dev.serial)
+            running = bot is not None and bot.is_running and not bot.is_paused
+            btn_ind = ctk.CTkButton(row, text="⏸" if running else "▶", width=30, height=22, corner_radius=5,
+                                    fg_color=C["amber"] if running else C["green"], text_color="#451A03" if running else "#052E16",
+                                    font=ctk.CTkFont("Segoe UI", 10, "bold"), command=lambda s=dev.serial: self._toggle_single_adb_bot(s))
             btn_ind.pack(side="right", padx=(4, 6), pady=3)
             self.adb_device_btns[dev.serial] = btn_ind
             st = ctk.CTkLabel(row, text="Sẵn sàng", font=ctk.CTkFont("Segoe UI", 10), text_color=C["green"])
@@ -1080,6 +1211,9 @@ class DaoRongStudioV10(ctk.CTk):
             messagebox.showinfo("AI Cài Luật", "Hãy gõ 1 câu tiếng Việt (hoặc bấm nút Mẫu) trước nhé!")
             return
         parsed = self.rule_parser.parse(prompt)
+        if parsed.get("error"):
+            messagebox.showwarning("Chưa áp dụng luật", parsed["error"])
+            return
         if parsed["matched_count"] == 0:
             messagebox.showwarning("Chưa hiểu câu lệnh", "Hãy ghi rõ hành động (Bán / Cất / Chúc phúc) + tên hoặc độ hiếm rồng.")
             return
@@ -1225,11 +1359,20 @@ class DaoRongStudioV10(ctk.CTk):
         self.append_log("Đã đặt lại cặp rồng bố mẹ.")
 
     def _run_preflight_ui(self) -> None:
-        self._save_all_settings(silent=True)
+        if not self._save_all_settings():
+            return
         ctrl = self.config_data.get("control_mode", "windows")
         serial = next((s for s, v in self.adb_device_vars.items() if v.get()), "") if ctrl == "adb" else ""
+        cfg = self.config_data
+        if ctrl == "adb":
+            if not serial:
+                messagebox.showwarning("Chưa chọn thiết bị ADB", "Hãy quét và chọn ít nhất một thiết bị.", parent=self)
+                return
+            cfg = self._get_adb_run_config(serial)
+            if cfg is None:
+                return
         tmp = DaoRongBot(
-            BASE_DIR, self.config_data, lambda _m: None, lambda _s: None,
+            BASE_DIR, cfg, lambda _m: None, lambda _s: None,
             adb=self.adb_ctrl if ctrl == "adb" else None, adb_serial=serial,
             shared_text_matcher=self.shared_text_matcher, shared_name_cache=self.shared_name_cache,
             shared_calibrator=self.shared_calibrator, shared_pair_stats=self.shared_pair_stats,
@@ -1294,43 +1437,58 @@ class DaoRongStudioV10(ctk.CTk):
     def _load_profile_dict(self, prof_name: str) -> Dict[str, Any]:
         cfg = dict(self.config_data)
         if prof_name and prof_name != "Mặc định":
+            if "/" in prof_name or "\\" in prof_name or prof_name not in self._list_profiles():
+                raise ValueError(f"Không tìm thấy profile '{prof_name}'.")
             p = PROFILES_DIR / f"{prof_name}.json"
-            if p.is_file():
-                try:
-                    cfg.update(json.loads(p.read_text(encoding="utf-8")))
-                except Exception:
-                    pass
-        return cfg
+            profile = _config_object(p)
+            for old, current in (("drag", "drag_settings"), ("timing", "timings")):
+                if isinstance(profile.get(old), dict) and current not in profile:
+                    profile[current] = profile[old]
+            for key, value in profile.items():
+                if key in ("drag_settings", "timings", "confidence", "auto_stop", "pins", "dragon_text_rules") and isinstance(value, dict):
+                    cfg[key] = {**cfg.get(key, {}), **value}
+                else:
+                    cfg[key] = value
+        return _normalize_config(cfg)
 
     def _save_new_profile(self) -> None:
-        self._save_all_settings(silent=True)
+        if not self._save_all_settings():
+            return
         name = simpledialog.askstring("Lưu Profile", "Nhập tên Profile (vd: Cày Bụi, Săn 24★):", parent=self)
         if not name or not name.strip():
             return
         safe = "".join(ch for ch in name.strip() if ch.isalnum() or ch in (" ", "_", "-", "đ", "Đ")).strip()
-        if not safe:
+        if not safe or safe.casefold() == "mặc định".casefold():
+            messagebox.showerror("Tên profile", "Hãy chọn tên profile khác 'Mặc định'.", parent=self)
             return
-        self.config_data["active_profile"] = safe
-        (PROFILES_DIR / f"{safe}.json").write_text(json.dumps(self.config_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        cfg = {**self.config_data, "active_profile": safe}
+        try:
+            save_config(cfg, PROFILES_DIR / f"{safe}.json")
+        except OSError as exc:
+            messagebox.showerror("Lỗi lưu profile", str(exc), parent=self)
+            return
         self.combo_profile.configure(values=self._list_profiles())
         self.var_profile_sel.set(safe)
+        self._persist_settings(cfg)
         self.append_log(f"Đã lưu Profile '{safe}'.")
 
     def _load_selected_profile(self) -> None:
         sel = self.var_profile_sel.get()
         if sel == "Mặc định":
             return
-        p = PROFILES_DIR / f"{sel}.json"
-        if not p.is_file():
+        try:
+            cfg = self._load_profile_dict(sel)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Lỗi tải profile", f"Không thể đọc profile '{sel}': {exc}", parent=self)
             return
-        self.config_data.update(json.loads(p.read_text(encoding="utf-8")))
-        self.config_data["active_profile"] = sel
-        save_config(self.config_data)
+        cfg["active_profile"] = sel
+        if not self._persist_settings(cfg):
+            return
         self.var_win_title.set(self.config_data.get("window_title_keyword", "AUTO"))
         self.var_p1.set(self.config_data.get("selected_parent_1") or "(Chưa có mẫu)")
         self.var_p2.set(self.config_data.get("selected_parent_2") or "(Chưa có mẫu)")
         self.var_bot_mode_vn.set(self._mode_to_vn.get(self.config_data.get("bot_mode", "breed_and_dust"), "Lai + Hóa Bụi"))
-        self.var_ctrl_mode_vn.set(self._ctrl_to_vn.get(self.config_data.get("control_mode", "windows"), "Chuột chính"))
+        self.var_ctrl_mode_vn.set(self._ctrl_to_vn.get(self.config_data.get("control_mode", "windows"), "Chuột Thường"))
         self.var_unknown_vn.set(self._unk_map_to_vn.get(self.config_data.get("unknown_dragon_action", "keep"), "Cất"))
         self.var_speed_vn.set(self._spd_to_vn.get(self.config_data.get("speed_preset", "fast"), "Nhanh"))
         self.var_hops.set(str(self.config_data.get("island_hops", 2)))
@@ -1338,6 +1496,15 @@ class DaoRongStudioV10(ctk.CTk):
         self.var_watchdog_sec.set(str(self.config_data.get("watchdog_seconds", 180)))
         self.var_adb_path.set(self.config_data.get("adb_path", ""))
         self.var_dust_only_session.set(bool(self.config_data.get("dust_only_session_bred", True)))
+        for key, var in (
+            ("use_color_check", self.var_color_check), ("auto_scale_templates", self.var_auto_scale),
+            ("enable_text_ocr", self.var_enable_ocr), ("auto_check_update", self.var_auto_update),
+            ("human_like_input", self.var_human_like), ("human_break_enabled", self.var_human_break),
+            ("save_rare_snapshots", self.var_save_rare), ("sound_alert", self.var_sound_alert),
+            ("verbose_log", self.var_verbose_log), ("collect_ai_dataset", self.var_collect_ai),
+        ):
+            var.set(self.config_data[key])
+        self.var_accuracy.set(self.config_data["accuracy_mode"])
         self.var_watchdog_relaunch.set(bool(self.config_data.get("watchdog_relaunch", True)))
         self.var_remote_notify.set(bool(self.config_data.get("enable_remote_notify", False)))
         self.var_tg_token.set(str(self.config_data.get("telegram_token", "")))
@@ -1353,16 +1520,23 @@ class DaoRongStudioV10(ctk.CTk):
         self.var_as_rare.set(str(as_c.get("stop_on_rare_count", 0)))
         self.var_as_epic.set(bool(as_c.get("stop_on_epic_or_event", False)))
         self.adb_ctrl.custom_adb_path = self.var_adb_path.get().strip()
+        self._show_control_panel()
         self._refresh_all_lists()
         self.append_log(f"Đã tải Profile '{sel}'.")
 
     def _delete_selected_profile(self) -> None:
         sel = self.var_profile_sel.get()
-        if sel == "Mặc định":
+        if sel == "Mặc định" or sel not in self._list_profiles():
             return
-        (PROFILES_DIR / f"{sel}.json").unlink(missing_ok=True)
+        try:
+            (PROFILES_DIR / f"{sel}.json").unlink(missing_ok=True)
+        except OSError as exc:
+            messagebox.showerror("Lỗi xóa profile", str(exc), parent=self)
+            return
         self.combo_profile.configure(values=self._list_profiles())
         self.var_profile_sel.set("Mặc định")
+        if self.config_data.get("active_profile") == sel:
+            self._persist_settings({**self.config_data, "active_profile": "Mặc định"})
 
     def _toggle_mini_hud(self) -> None:
         if self._mini_hud is not None and self._mini_hud.winfo_exists():
@@ -1397,59 +1571,68 @@ class DaoRongStudioV10(ctk.CTk):
             lbl.configure(text="✓" if (TEMPLATES_DIR / "ui" / fname).is_file() else "✕",
                           text_color=C["green"] if (TEMPLATES_DIR / "ui" / fname).is_file() else C["red"])
         self._refresh_active_rule_view()
-        parent_files = sorted(p.name for p in (TEMPLATES_DIR / "parents").iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"})
-        opts = parent_files if parent_files else ["(Chưa có mẫu)"]
+        parent_files = sorted(p.name for p in (TEMPLATES_DIR / "parents").iterdir() if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg"})
+        opts = [NO_PARENT_SAMPLE, *parent_files]
         self.combo_p1.configure(values=opts)
         self.combo_p2.configure(values=opts)
-        if self.var_p1.get() not in parent_files:
-            self.var_p1.set(parent_files[0] if parent_files else "(Chưa có mẫu)")
-        if self.var_p2.get() not in parent_files or (len(parent_files) > 1 and self.var_p2.get() == self.var_p1.get()):
-            other = [f for f in parent_files if f != self.var_p1.get()]
-            self.var_p2.set(other[0] if other else (parent_files[0] if parent_files else "(Chưa có mẫu)"))
+        if self.var_p1.get() not in opts:
+            self.var_p1.set(NO_PARENT_SAMPLE)
+        if self.var_p2.get() not in opts:
+            self.var_p2.set(NO_PARENT_SAMPLE)
+
+    def _persist_settings(self, cfg: Dict[str, Any], silent: bool = False) -> bool:
+        try:
+            save_config(cfg)
+        except OSError as exc:
+            if not silent:
+                messagebox.showerror("Lỗi lưu cài đặt", str(exc), parent=self)
+            return False
+        self.config_data = cfg
+        return True
 
     def _save_all_settings(self, silent: bool = False) -> bool:
         try:
-            hops_val = int(self.var_hops.get() or 2)
-            dust_max_val = max(0, int(self.var_dust_max_star.get() or 0))
-            wd_sec_val = max(0, int(self.var_watchdog_sec.get() or 0))
-            as_mins_val = max(0, int(self.var_as_mins.get() or 0))
-            as_breeds_val = max(0, int(self.var_as_breeds.get() or 0))
-            as_rare_val = max(0, int(self.var_as_rare.get() or 0))
+            hops_val = _nonnegative_int(self.var_hops.get().strip() or 2)
+            dust_max_val = _nonnegative_int(self.var_dust_max_star.get().strip() or 0)
+            wd_sec_val = _nonnegative_int(self.var_watchdog_sec.get().strip() or 0)
+            as_mins_val = _nonnegative_int(self.var_as_mins.get().strip() or 0)
+            as_breeds_val = _nonnegative_int(self.var_as_breeds.get().strip() or 0)
+            as_rare_val = _nonnegative_int(self.var_as_rare.get().strip() or 0)
         except ValueError:
             if not silent:
-                messagebox.showerror("Sai định dạng", "Các ô số (lọc sao, số đảo, hẹn giờ, watchdog) phải là số nguyên.")
+                messagebox.showerror("Sai định dạng", "Các ô số (lọc sao, số đảo, hẹn giờ, watchdog) phải là số nguyên không âm.")
             return False
 
-        self.config_data["window_title_keyword"] = self.var_win_title.get().strip() or "AUTO"
-        self.config_data["selected_parent_1"] = "" if self.var_p1.get() == "(Chưa có mẫu)" else self.var_p1.get()
-        self.config_data["selected_parent_2"] = "" if self.var_p2.get() == "(Chưa có mẫu)" else self.var_p2.get()
-        self.config_data["bot_mode"] = self._mode_from_vn.get(self.var_bot_mode_vn.get(), "breed_and_dust")
-        self.config_data["control_mode"] = self._ctrl_from_vn.get(self.var_ctrl_mode_vn.get(), "windows")
-        self.config_data["unknown_dragon_action"] = self._unk_map_from_vn.get(self.var_unknown_vn.get(), "keep")
-        self.config_data["speed_preset"] = self._spd_from_vn.get(self.var_speed_vn.get(), "fast")
-        self.config_data["island_hops"] = hops_val
-        self.config_data["dust_max_star"] = dust_max_val
-        self.config_data["dust_rarities"] = [k for k, v in self.var_dust_rars.items() if v.get()] or ["Nguyên Liệu"]
-        self.config_data["dust_only_session_bred"] = bool(self.var_dust_only_session.get())
-        self.config_data["watchdog_seconds"] = wd_sec_val
-        self.config_data["adb_path"] = self.var_adb_path.get().strip()
-        self.adb_ctrl.custom_adb_path = self.config_data["adb_path"]
-        self.config_data["use_color_check"] = True
-        self.config_data["auto_scale_templates"] = True
-        self.config_data["enable_text_ocr"] = True
-        self.config_data["auto_check_update"] = bool(self.var_auto_update.get())
-        self.config_data["human_like_input"] = bool(self.var_human_like.get())
-        self.config_data["human_break_enabled"] = bool(self.var_human_break.get())
-        self.config_data["save_rare_snapshots"] = bool(self.var_save_rare.get())
-        self.config_data["sound_alert"] = bool(self.var_sound_alert.get())
-        self.config_data["verbose_log"] = bool(self.var_verbose_log.get())
-        self.config_data["collect_ai_dataset"] = bool(self.var_collect_ai.get())
-        self.config_data["watchdog_relaunch"] = bool(self.var_watchdog_relaunch.get())
-        self.config_data["enable_remote_notify"] = bool(self.var_remote_notify.get())
-        self.config_data["telegram_token"] = self.var_tg_token.get().strip()
-        self.config_data["telegram_chat_id"] = self.var_tg_chat.get().strip()
-        self.config_data["discord_webhook"] = self.var_dc_webhook.get().strip()
-        self.config_data["auto_stop"] = {
+        cfg = dict(self.config_data)
+        cfg["window_title_keyword"] = self.var_win_title.get().strip() or "AUTO"
+        cfg["selected_parent_1"] = "" if self.var_p1.get() == NO_PARENT_SAMPLE else self.var_p1.get()
+        cfg["selected_parent_2"] = "" if self.var_p2.get() == NO_PARENT_SAMPLE else self.var_p2.get()
+        cfg["bot_mode"] = self._mode_from_vn.get(self.var_bot_mode_vn.get(), "breed_and_dust")
+        cfg["control_mode"] = self._ctrl_from_vn.get(self.var_ctrl_mode_vn.get(), "windows")
+        cfg["unknown_dragon_action"] = self._unk_map_from_vn.get(self.var_unknown_vn.get(), "keep")
+        cfg["speed_preset"] = self._spd_from_vn.get(self.var_speed_vn.get(), "fast")
+        cfg["island_hops"] = hops_val
+        cfg["dust_max_star"] = dust_max_val
+        cfg["dust_rarities"] = [k for k, v in self.var_dust_rars.items() if v.get()]
+        cfg["dust_only_session_bred"] = bool(self.var_dust_only_session.get())
+        cfg["watchdog_seconds"] = wd_sec_val
+        cfg["adb_path"] = self.var_adb_path.get().strip()
+        cfg["use_color_check"] = bool(self.var_color_check.get())
+        cfg["auto_scale_templates"] = bool(self.var_auto_scale.get())
+        cfg["enable_text_ocr"] = bool(self.var_enable_ocr.get())
+        cfg["auto_check_update"] = bool(self.var_auto_update.get())
+        cfg["human_like_input"] = bool(self.var_human_like.get())
+        cfg["human_break_enabled"] = bool(self.var_human_break.get())
+        cfg["save_rare_snapshots"] = bool(self.var_save_rare.get())
+        cfg["sound_alert"] = bool(self.var_sound_alert.get())
+        cfg["verbose_log"] = bool(self.var_verbose_log.get())
+        cfg["collect_ai_dataset"] = bool(self.var_collect_ai.get())
+        cfg["watchdog_relaunch"] = bool(self.var_watchdog_relaunch.get())
+        cfg["enable_remote_notify"] = bool(self.var_remote_notify.get())
+        cfg["telegram_token"] = self.var_tg_token.get().strip()
+        cfg["telegram_chat_id"] = self.var_tg_chat.get().strip()
+        cfg["discord_webhook"] = self.var_dc_webhook.get().strip()
+        cfg["auto_stop"] = {
             "enabled": bool(self.var_as_enabled.get()),
             "max_minutes": as_mins_val,
             "max_breeds": as_breeds_val,
@@ -1457,9 +1640,12 @@ class DaoRongStudioV10(ctk.CTk):
             "stop_on_epic_or_event": bool(self.var_as_epic.get()),
         }
         acc = self.var_accuracy.get()
-        self.config_data["accuracy_mode"] = acc
-        self.config_data["confidence"] = dict(ACCURACY_PRESETS.get(acc, ACCURACY_PRESETS["Chuẩn"]))
-        save_config(self.config_data)
+        cfg["accuracy_mode"] = acc
+        if acc != self.config_data.get("accuracy_mode") or not cfg.get("confidence"):
+            cfg["confidence"] = dict(ACCURACY_PRESETS.get(acc, ACCURACY_PRESETS["Chuẩn"]))
+        if not self._persist_settings(cfg, silent=silent):
+            return False
+        self.adb_ctrl.custom_adb_path = cfg["adb_path"]
         if not silent:
             self.append_log("Đã lưu toàn bộ cài đặt.")
         return True
@@ -1502,8 +1688,37 @@ class DaoRongStudioV10(ctk.CTk):
         else:
             self._start_bot(restart_from_egg=True)
 
+    def _validate_run_config(self, cfg: Dict[str, Any], label: str) -> bool:
+        p1 = cfg.get("selected_parent_1", "")
+        p2 = cfg.get("selected_parent_2", "")
+        if not p1 or not p2:
+            messagebox.showwarning("Thiếu rồng bố mẹ", f"{label}: hãy chụp và chọn đủ hai mẫu rồng.", parent=self)
+            return False
+        if p1.casefold() == p2.casefold():
+            messagebox.showwarning("Trùng cặp rồng bố mẹ", f"{label}: hãy chọn hai mẫu rồng khác nhau.", parent=self)
+            return False
+        parents_dir = TEMPLATES_DIR / "parents"
+        if any("/" in name or "\\" in name or not (parents_dir / name).is_file() for name in (p1, p2)):
+            messagebox.showwarning("Thiếu ảnh mẫu", f"{label}: không tìm thấy một trong hai ảnh mẫu bố mẹ.", parent=self)
+            return False
+        if cfg.get("bot_mode", "breed_and_dust") == "breed_and_dust" and not cfg.get("dust_rarities", ["Nguyên Liệu"]):
+            messagebox.showwarning("Chưa chọn độ hiếm", f"{label}: chọn nhóm được phép Hóa Bụi hoặc dùng chế độ Chỉ Auto Lai.", parent=self)
+            return False
+        return True
+
+    def _get_adb_run_config(self, serial: str) -> Optional[Dict[str, Any]]:
+        profile_var = self.adb_device_profiles.get(serial)
+        profile = profile_var.get() if profile_var is not None else "Mặc định"
+        try:
+            cfg = self._load_profile_dict(profile)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Lỗi profile ADB", f"{serial}, profile '{profile}': {exc}", parent=self)
+            return None
+        if not self._validate_run_config(cfg, f"{serial}, profile '{profile}'"):
+            return None
+        return cfg
+
     def _toggle_single_adb_bot(self, serial: str) -> None:
-        self._save_all_settings(silent=True)
         existing = self.multi_bots.get(serial)
         btn = self.adb_device_btns.get(serial)
         if existing is not None and existing.is_running:
@@ -1516,10 +1731,10 @@ class DaoRongStudioV10(ctk.CTk):
                 if btn:
                     btn.configure(text="▶", fg_color=C["green"], text_color="#052E16")
             return
-        prof = self.adb_device_profiles[serial].get() if serial in self.adb_device_profiles else "Mặc định"
-        acc_cfg = self._load_profile_dict(prof)
-        if not acc_cfg.get("selected_parent_1") or not acc_cfg.get("selected_parent_2"):
-            messagebox.showwarning("Thiếu rồng bố mẹ", f"Profile '{prof}' chưa chọn đủ 2 rồng bố mẹ!")
+        if not self._save_all_settings():
+            return
+        acc_cfg = self._get_adb_run_config(serial)
+        if acc_cfg is None:
             return
         lbl = f"ADB {serial}"
         bot = DaoRongBot(
@@ -1544,21 +1759,14 @@ class DaoRongStudioV10(ctk.CTk):
             if not sels:
                 messagebox.showwarning("Chưa chọn thiết bị ADB", "Hãy bấm 'Quét ADB' và tick ít nhất 1 giả lập!")
                 return
-            acc_configs: List[Tuple[str, str, Dict[str, Any]]] = []
+            acc_configs: List[tuple[str, Dict[str, Any]]] = []
             for serial in sels:
-                prof = self.adb_device_profiles[serial].get() if serial in self.adb_device_profiles else "Mặc định"
-                acc_cfg = self._load_profile_dict(prof)
-                ap1 = acc_cfg.get("selected_parent_1", "")
-                ap2 = acc_cfg.get("selected_parent_2", "")
-                if not ap1 or not ap2:
-                    messagebox.showwarning("Thiếu rồng bố mẹ", f"Thiết bị {serial} (Profile '{prof}') chưa chọn đủ 2 rồng bố mẹ!")
+                acc_cfg = self._get_adb_run_config(serial)
+                if acc_cfg is None:
                     return
-                if ap1 == ap2:
-                    messagebox.showwarning("Trùng cặp rồng bố mẹ", f"Thiết bị {serial} (Profile '{prof}') đang chọn trùng 2 rồng bố mẹ!")
-                    return
-                acc_configs.append((serial, prof, acc_cfg))
+                acc_configs.append((serial, acc_cfg))
             self.multi_bots.clear()
-            for idx, (serial, prof, acc_cfg) in enumerate(acc_configs, 1):
+            for idx, (serial, acc_cfg) in enumerate(acc_configs, 1):
                 lbl = f"Acc #{idx} ({serial})"
                 bot = DaoRongBot(
                     BASE_DIR, acc_cfg,
@@ -1575,16 +1783,10 @@ class DaoRongStudioV10(ctk.CTk):
             self.btn_play_pause.configure(text="⏸  TẠM DỪNG (Ctrl+Enter)", fg_color=C["amber"], text_color="#451A03")
             return
 
-        p1 = self.config_data.get("selected_parent_1", "")
-        p2 = self.config_data.get("selected_parent_2", "")
-        if not p1 or not p2:
-            messagebox.showwarning("Chưa chọn cặp rồng", "Hãy chụp và chọn đủ 2 rồng bố mẹ trước khi chạy!")
-            return
-        if p1 == p2:
-            messagebox.showwarning("Trùng cặp rồng bố mẹ", "Rồng bố/mẹ 1 và Rồng bố/mẹ 2 đang chọn giống hệt nhau!\nHãy chọn 2 con khác nhau ở 2 ô Bố/Mẹ.")
+        if not self._validate_run_config(self.config_data, "Cấu hình hiện tại"):
             return
         self.bot = DaoRongBot(
-            BASE_DIR, self.config_data, self.append_log, self.update_stats,
+            BASE_DIR, deepcopy(self.config_data), self.append_log, self.update_stats,
             alert_callback=self._on_bot_alert, account_label="Chuột chính",
             shared_text_matcher=self.shared_text_matcher, shared_name_cache=self.shared_name_cache,
             shared_calibrator=self.shared_calibrator, shared_pair_stats=self.shared_pair_stats,
@@ -1720,7 +1922,8 @@ class DaoRongStudioV10(ctk.CTk):
     # AUTO-UPDATE QUA GITHUB RELEASES
     # ------------------------------------------------------------------
     def _periodic_update_check(self) -> None:
-        self._check_update_async(silent=True)
+        if self.config_data.get("auto_check_update", True):
+            self._check_update_async(silent=True)
         # Tự động kiểm tra ngầm mỗi 3 phút (180s) để báo ngay khi đang treo máy mà có bản mới!
         self.after(180_000, self._periodic_update_check)
 

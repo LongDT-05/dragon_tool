@@ -15,7 +15,7 @@ if errorlevel 1 goto :ERR
 
 echo [2/4] Dang ma hoa ma nguon bang PyArmor...
 if exist "build_obf" rmdir /s /q "build_obf"
-".venv\Scripts\pyarmor.exe" gen -O build_obf main.py bot_engine.py vision.py actions.py capture_tool.py ocr_engine.py updater.py adb_controller.py smart_ai.py
+".venv\Scripts\pyarmor.exe" gen -O build_obf main.py bot_engine.py vision.py actions.py capture_tool.py ocr_engine.py updater.py adb_controller.py smart_ai.py notifier.py yolo_vision.py
 if errorlevel 1 goto :FALLBACK_NO_OBF
 
 if exist "build" rmdir /s /q "build"
@@ -42,6 +42,7 @@ copy /Y "dragons_db.json" "dist\DaoRong_tool\dragons_db.json" >nul
 copy /Y "app_icon.ico" "dist\DaoRong_tool\app_icon.ico" >nul
 copy /Y "app_icon.png" "dist\DaoRong_tool\app_icon.png" >nul
 xcopy /E /I /Y "templates" "dist\DaoRong_tool\templates" >nul
+if exist "models" xcopy /E /I /Y "models" "dist\DaoRong_tool\models" >nul
 
 echo.
 echo ============================================================

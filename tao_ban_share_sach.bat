@@ -14,12 +14,15 @@ if exist "DaoRong_tool.zip" del /f /q "DaoRong_tool.zip"
 
 echo [1/3] Dang sao chep bo app DaoRong_tool...
 xcopy /E /I /Y "dist\DaoRong_tool" "release\DaoRong_tool" >nul
+if errorlevel 1 goto :ERR
 
 echo [2/3] Dang giu nguyen templates/ui va don sach anh rong ca nhan...
-".venv\Scripts\python.exe" -c "import json, pathlib; root=pathlib.Path(r'release\DaoRong_tool'); [p.unlink() for sub in ('parents','bless','keep','sell','dust_targets') for p in (root/'templates'/sub).glob('*.*') if p.suffix.lower() in {'.png','.jpg','.jpeg'}]; cfg=json.loads((root/'config.json').read_text(encoding='utf-8')); cfg['window_title_keyword']='AUTO'; cfg['dragon_reference_window_size']=[0,0]; cfg['selected_parent_1']=''; cfg['selected_parent_2']=''; cfg['dragon_text_rules']={'bless':[],'keep':[],'sell':[]}; (root/'config.json').write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding='utf-8')"
+".venv\Scripts\python.exe" prepare_share.py "release\DaoRong_tool"
+if errorlevel 1 goto :ERR
 
 echo [3/3] Dang nen thanh DaoRong_tool.zip...
 powershell -NoProfile -Command "Compress-Archive -Path 'release\DaoRong_tool' -DestinationPath 'DaoRong_tool.zip' -Force"
+if errorlevel 1 goto :ERR
 rmdir /s /q "release\DaoRong_tool"
 
 echo.
@@ -31,6 +34,11 @@ echo ============================================================
 echo.
 pause
 exit /b 0
+
+:ERR
+echo [LOI] Khong the tao ban chia se. Kiem tra buoc bao loi o tren.
+pause
+exit /b 1
 
 :NO_EXE
 echo [LOI] Chua co dist\DaoRong_tool\DaoRong_tool.exe!

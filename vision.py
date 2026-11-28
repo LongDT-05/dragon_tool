@@ -14,7 +14,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -294,9 +294,11 @@ class VisionEngine:
             if base_img is None:
                 return None
             self._template_cache[key] = (mtime, base_img)
-            # Xóa cache scaled cũ của file này
+            # Ảnh mẫu mới có thể cần kích thước và tỷ lệ khác ảnh cũ.
             for sk in [k for k in self._scaled_cache if k[0] == key]:
                 del self._scaled_cache[sk]
+            for ck in [k for k in self._confirmed_scales if k[0] == key]:
+                del self._confirmed_scales[ck]
 
         # Dùng kích thước chuẩn riêng cho nút UI (setup sẵn) vs ảnh Rồng (người dùng tự chụp)
         is_ui_tmpl = p.parent.name.lower() == "ui"
@@ -366,6 +368,75 @@ class VisionEngine:
             )
         return MatchResult(found=False, name=name, score=score, category=category)
 
+    def iter_template_variants(
+        self,
+        template_path: str | Path,
+        rect: WindowRect,
+        *,
+        compare_scales: bool = False,
+    ) -> Iterator[Tuple[Optional[float], np.ndarray]]:
+        """Trả ảnh cỡ tham chiếu trước, rồi thử các cỡ khác nếu cần."""
+        path = Path(template_path)
+        tmpl = self._load_template(path, target_rect=rect)
+        if tmpl is None:
+            return
+        yield None, tmpl
+        if not self.auto_scale:
+            return
+
+        eff_ref = self.reference_size if path.parent.name.lower() == "ui" else self.dragon_reference_size
+        if eff_ref[0] > 200 and eff_ref[1] > 200:
+            rw, rh = float(eff_ref[0]), float(eff_ref[1])
+            if self.is_adb_mode and rw > 600 and rh > 400:
+                rw -= 36.0
+                rh -= 36.0
+            sx = rect.width / max(200.0, rw)
+            sy = rect.height / max(200.0, rh)
+            scale = (sx + sy) / 2.0
+            mults = (0.97, 1.03, 0.94, 1.06, 0.85, 1.15, 0.80, 1.25)
+        else:
+            # Chưa có cỡ gốc: thử các tỷ lệ thường gặp.
+            scale = 1.0
+            mults = (0.80, 1.25, 0.90, 1.10, 0.75, 1.30)
+
+        base_img = self._load_template(path)
+        if base_img is None:
+            return
+        bh, bw = base_img.shape[:2]
+        file_key = str(path.resolve())
+        scale_list = [scale * mult for mult in mults]
+        if compare_scales:
+            # Cỡ tham chiếu có thể khác với cỡ lúc chụp mẫu.
+            scale_list = [1.0, scale] + scale_list
+        elif all(abs(sc - 1.0) > 0.02 for sc in scale_list):
+            scale_list.append(1.0)
+        cached_scale = self._confirmed_scales.get((file_key, rect.width, rect.height))
+        if cached_scale is not None:
+            scale_list.insert(0, cached_scale)
+
+        tried_sizes = {(tmpl.shape[1], tmpl.shape[0])}
+        for candidate_scale in scale_list:
+            if candidate_scale == 1.0:
+                nw, nh = bw, bh
+            else:
+                nw = max(6, int(round(bw * candidate_scale)))
+                nh = max(6, int(round(bh * candidate_scale)))
+            size = (nw, nh)
+            if size in tried_sizes:
+                continue
+            tried_sizes.add(size)
+            if size == (bw, bh):
+                yield candidate_scale, base_img
+                continue
+            scaled_key = (file_key, nw, nh)
+            candidate = self._scaled_cache.get(scaled_key) if compare_scales else None
+            if candidate is None:
+                interp = cv2.INTER_AREA if candidate_scale < 1.0 else cv2.INTER_CUBIC
+                candidate = cv2.resize(base_img, size, interpolation=interp)
+                if compare_scales:
+                    self._scaled_cache[scaled_key] = candidate
+            yield candidate_scale, candidate
+
     def find_template(
         self,
         template_path: str | Path,
@@ -373,60 +444,38 @@ class VisionEngine:
         roi_rel: Optional[List[float]] = None,
         screen_bgr: Optional[np.ndarray] = None,
         rect: Optional[WindowRect] = None,
+        *,
+        compare_scales: bool = False,
     ) -> MatchResult:
+        """So thêm các tỷ lệ hợp lý khi tìm thẻ cần xác minh trước khi bấm."""
         if screen_bgr is None or rect is None:
             screen_bgr, rect = self.capture_window(rect)
-        tmpl = self._load_template(template_path, target_rect=rect)
-        name = Path(template_path).stem
-        if tmpl is None:
-            return MatchResult(found=False, name=name, score=0.0)
+        path = Path(template_path)
+        variants = self.iter_template_variants(path, rect, compare_scales=compare_scales)
+        primary = next(variants, None)
+        if primary is None:
+            return MatchResult(found=False, name=path.stem, score=0.0)
+        _, tmpl = primary
         search_img, ox, oy = self.crop_roi(screen_bgr, rect, roi_rel)
         best = self.match_image(
-            search_img, tmpl, threshold=threshold, offset_x=ox, offset_y=oy, name=name
+            search_img, tmpl, threshold=threshold, offset_x=ox, offset_y=oy, name=path.stem
         )
-        # Multi-scale fallback khi Fullscreen (do mất thanh tiêu đề/toolbar làm lệch nhẹ tỷ lệ 3-6%)
-        is_ui_tmpl = Path(template_path).parent.name.lower() == "ui"
-        eff_ref = self.reference_size if is_ui_tmpl else self.dragon_reference_size
-        if self.auto_scale and (not best.found or best.score < 0.96):
-            if eff_ref[0] > 200 and eff_ref[1] > 200:
-                rw, rh = float(eff_ref[0]), float(eff_ref[1])
-                if self.is_adb_mode and rw > 600 and rh > 400:
-                    rw -= 36.0
-                    rh -= 36.0
-                sx = rect.width / max(200.0, rw)
-                sy = rect.height / max(200.0, rh)
-                s_avg = (sx + sy) / 2.0
-                mults = (0.97, 1.03, 0.94, 1.06, 0.85, 1.15, 0.80, 1.25)
-            else:
-                # Khi chưa có cỡ gốc (dragon_reference_window_size = [0, 0]) -> tự thử dải tỷ lệ 0.75..1.30!
-                s_avg = 1.0
-                mults = (0.80, 1.25, 0.90, 1.10, 0.75, 1.30)
-            base_img = self._load_template(template_path, target_rect=None)
-            if base_img is not None:
-                bh, bw = base_img.shape[:2]
-                ckey = (str(Path(template_path).resolve()), rect.width, rect.height)
-                # Tỷ lệ đã lưu chỉ dùng để ƯU TIÊN THỨ TỰ thử trước; chỉ dừng sớm nếu khớp >= 0.95!
-                scale_list = [s_avg * mult for mult in mults]
-                # Luôn giữ kích thước ảnh gốc (1.0) làm phương án dự phòng!
-                if all(abs(sc - 1.0) > 0.02 for sc in scale_list):
-                    scale_list.append(1.0)
-                cached_m = self._confirmed_scales.get(ckey)
-                if cached_m is not None:
-                    scale_list = [cached_m] + [sc for sc in scale_list if abs(sc - cached_m) > 0.01]
-                best_scale_used = None
-                for cur_sc in scale_list:
-                    nw = max(6, int(round(bw * cur_sc)))
-                    nh = max(6, int(round(bh * cur_sc)))
-                    interp = cv2.INTER_AREA if cur_sc < 1.0 else cv2.INTER_CUBIC
-                    cand = cv2.resize(base_img, (nw, nh), interpolation=interp)
-                    m = self.match_image(
-                        search_img, cand, threshold=threshold, offset_x=ox, offset_y=oy, name=name
-                    )
-                    if m.score > best.score:
-                        best = m
-                        best_scale_used = cur_sc
-                if best.found and best_scale_used is not None:
-                    self._confirmed_scales[ckey] = best_scale_used
+        scale_check_score = 1.0 if compare_scales else 0.96
+        if best.found and best.score >= scale_check_score:
+            return best
+
+        best_scale = None
+        for candidate_scale, candidate in variants:
+            result = self.match_image(
+                search_img, candidate, threshold=threshold, offset_x=ox, offset_y=oy, name=path.stem
+            )
+            if result.score > best.score:
+                best = result
+                best_scale = candidate_scale
+            if compare_scales and best.found and best.score >= 1.0:
+                break
+        if best.found and best_scale is not None:
+            self._confirmed_scales[(str(path.resolve()), rect.width, rect.height)] = best_scale
         return best
 
     def rank_across_folders(
@@ -489,13 +538,16 @@ class VisionEngine:
         poll_interval: float = 0.12,
         roi_rel: Optional[List[float]] = None,
         stop_check=None,
+        *,
+        compare_scales: bool = False,
     ) -> MatchResult:
         deadline = time.monotonic() + timeout
         last = MatchResult(found=False, name=Path(template_path).stem)
+        scale_options = {"compare_scales": True} if compare_scales else {}
         while time.monotonic() < deadline:
             if stop_check and stop_check():
                 return MatchResult(found=False, name=last.name)
-            res = self.find_template(template_path, threshold=threshold, roi_rel=roi_rel)
+            res = self.find_template(template_path, threshold=threshold, roi_rel=roi_rel, **scale_options)
             if res.found:
                 return res
             last = res

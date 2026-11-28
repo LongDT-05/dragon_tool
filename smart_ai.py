@@ -60,18 +60,32 @@ class NaturalRuleParser:
     def _extract_star_condition(self, clause_raw: str) -> Tuple[str, Optional[int]]:
         raw_low = (clause_raw or "").lower()
         cn = normalize_vn(clause_raw)
-        has_ge = (">=" in raw_low) or any(k in cn for k in ("tu ", "tro len", "lon hon", "tren "))
-        m_any_num = re.search(r"(\d+)", raw_low if ">=" in raw_low else cn)
+        operator = re.search(r"(>=|≥|>)\s*(\d+)", raw_low)
+        if re.search(r"[>≥]", raw_low) and operator is None:
+            return "invalid", None
+        has_ge = operator is not None or any(k in cn for k in ("tu ", "tro len", "lon hon", "tren "))
+        m_any_num = (
+            operator
+            if operator is not None
+            else re.search(r"(\d+)\s*sao\b", cn) or re.search(r"(\d+)", cn)
+        )
         if m_any_num and has_ge:
-            val = int(m_any_num.group(1))
-            if ("tren " in cn or "lon hon" in cn) and "tro len" not in cn and ">=" not in raw_low and "tu " not in cn:
+            digits = m_any_num.group(2 if operator is not None else 1)
+            if len(digits) > 2:
+                return "invalid", None
+            val = int(digits)
+            if (operator is not None and operator.group(1) == ">") or (
+                operator is None and ("tren " in cn or "lon hon" in cn) and "tro len" not in cn and "tu " not in cn
+            ):
                 val += 1
             if 1 <= val <= 40:
                 return ">=", val
             return "invalid", None
 
-        m_eq = re.search(r"(?:dung\s*|=\s*|\(\s*)?(\d+)\s*(?:sao|\*|★)", raw_low if "★" in raw_low else cn)
+        m_eq = re.search(r"(\d+)\s*(?:sao\b|[★⭐*])", raw_low)
         if m_eq:
+            if len(m_eq.group(1)) > 2:
+                return "invalid", None
             val = int(m_eq.group(1))
             if 1 <= val <= 40:
                 return "=", val
@@ -104,6 +118,19 @@ class NaturalRuleParser:
         raw = (text or "").strip()
         if not raw:
             return {"rules": result, "summary": [], "matched_count": 0}
+        normalized = normalize_vn(raw)
+        negated = re.search(r"\b(?:tru|dung (?:ban|cat|giu|chuc phuc|hoa bui)|khong (?:duoc )?(?:ban|cat|giu|chuc phuc|hoa bui))\b", normalized)
+        unsupported_stars = re.search(
+            r"\b(?:duoi|toi da|it hon|khong qua)\s+[0-9]+\b"
+            r"|\b[0-9]+\s*sao\s+tro xuong\b|\b[0-9]+\s+den\s+[0-9]+\s*sao\b",
+            normalized,
+        ) or re.search(r"[<≤]|\b[0-9]+\s*[-–]\s*[0-9]+\s*sao\b", raw)
+        if negated or unsupported_stars:
+            error = (
+                "Hãy ghi rõ từng nhóm rồng cần Bán, Cất hoặc Chúc phúc. Câu có phủ định hoặc ngoại lệ chưa được hỗ trợ."
+                if negated else "Hãy chọn mọi sao, đúng số sao hoặc từ một mức sao trở lên."
+            )
+            return {"rules": result, "summary": [], "matched_count": 0, "error": error}
 
         # Tách câu theo dấu phẩy, xuống dòng VÀ liên từ (còn lại/nhưng/riêng/trừ khi) TRƯỚC khi bỏ dấu
         # để mỗi mệnh đề giữ nguyên ký hiệu '>=', '★' riêng của nó, không rò sang mệnh đề khác!
@@ -125,7 +152,10 @@ class NaturalRuleParser:
             last_action = act
             star_op, star_val = self._extract_star_condition(clause)
             if star_op == "invalid":
-                continue
+                return {
+                    "rules": {"bless": [], "keep": [], "sell": []}, "summary": [], "matched_count": 0,
+                    "error": "Điều kiện sao phải là một số từ 1 đến 40.",
+                }
 
             matched_names: List[str] = []
             # 1. Tìm tên rồng cụ thể trong mệnh đề

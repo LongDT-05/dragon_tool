@@ -57,17 +57,13 @@ class AdbController:
 
     def find_adb_executable(self) -> Optional[str]:
         custom = (self.custom_adb_path or "").strip()
-        if custom:
-            if Path(custom).is_file():
-                self._adb_path = custom
-                return custom
-            self._adb_path = None
+        # Đường dẫn người dùng chọn chỉ có hiệu lực khi còn được cấu hình.
+        if custom and Path(custom).is_file():
+            return custom
         if self._adb_path and Path(self._adb_path).is_file():
             return self._adb_path
 
         candidates: List[str] = []
-        if self.custom_adb_path:
-            candidates.append(self.custom_adb_path)
 
         # Kiểm tra thư mục ./adb/ cạnh tool trước
         local_adb = self.base_dir / "adb" / "adb.exe"

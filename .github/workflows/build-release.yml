@@ -10,6 +10,8 @@ on:
       - 'requirements.txt'
       - 'templates/ui/**'
       - 'models/**'
+      - 'tests/**'
+      - '.github/workflows/build-release.yml'
   workflow_dispatch:
 
 permissions:
@@ -31,6 +33,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller pyarmor
+
+      - name: Test source before packaging
+        run: |
+          python -m compileall -q .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -v
 
       - name: Read version from updater.py
         id: ver
@@ -63,13 +71,16 @@ jobs:
       - name: Package Release ZIP & version.json
         shell: pwsh
         run: |
+          if (-not (Test-Path "dist\DaoRong_tool\DaoRong_tool.exe" -PathType Leaf)) {
+            throw "Windows executable is missing"
+          }
           New-Item -ItemType Directory -Force -Path release | Out-Null
           Compress-Archive -Path "dist\DaoRong_tool\*" -DestinationPath "release\DaoRong_tool_Update.zip" -Force
           $v = "${{ steps.ver.outputs.version }}"
           $repo = "${{ github.repository }}"
           $json = @{
             version = $v
-            download_url = "https://github.com/$repo/releases/latest/download/DaoRong_tool_Update.zip"
+            download_url = "https://github.com/$repo/releases/download/v$v/DaoRong_tool_Update.zip"
             notes = "DaoRong_tool v$v (Auto-built via GitHub Actions)"
           } | ConvertTo-Json -Depth 3
           [System.IO.File]::WriteAllText("$PWD\release\version.json", $json, [System.Text.UTF8Encoding]::new($false))
@@ -78,6 +89,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
           name: DaoRong_tool v${{ steps.ver.outputs.version }}
           body: "Bản build tự động DaoRong_tool v${{ steps.ver.outputs.version }}. Tải file DaoRong_tool_Update.zip giải nén để chạy hoặc bấm nút Cập nhật ngay trong app."
           files: |
