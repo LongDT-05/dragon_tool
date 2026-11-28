@@ -1274,13 +1274,26 @@ class DaoRongBot:
         if sb_path.is_file():
             sb_roi = self.calibrator.get_roi(self._mode_key, "btn_start_breed.png") or [0.38, 0.48, 0.58, 0.65]
             res = self.vision.wait_for_template(
-                sb_path, timeout=2.0, threshold=self._conf("button", 0.76), roi_rel=sb_roi, stop_check=self.should_stop
+                sb_path, timeout=2.2, threshold=self._conf("button", 0.76), roi_rel=sb_roi, stop_check=self.should_stop
             )
             if not res.found:
                 res = self.vision.find_template(sb_path, threshold=self._conf("button", 0.76))
             if res.found:
                 self.log_tech(f"[LAI RỒNG] Click 'Lai Rồng' ({res.x}, {res.y}).")
                 self.input.click(res.x, res.y, post_delay=0.10, stop_check=self.should_stop)
+            else:
+                self.log("⚠️ [LAG GAME] Nút 'Lai Rồng' không sáng -> Tắt bảng Lai và vào lai lại!")
+                closed = False
+                for close_name in ("btn_close_breed.png", "btn_close_popup.png"):
+                    rc = self._click_ui(close_name, timeout=1.2, retries=1, post_delay=0.45 * self._spd)
+                    if rc and rc.found:
+                        closed = True
+                        break
+                if not closed:
+                    _, cur_r = self.vision.capture_window()
+                    cx, cy = cur_r.rel_to_abs(0.745, 0.275)
+                    self.input.click(cx, cy, post_delay=0.45 * self._spd, stop_check=self.should_stop)
+                return BotState.OPEN_BREED
 
         self._consecutive_failures = 0
         self._breed_counted_for_cycle = False
@@ -1552,7 +1565,7 @@ class DaoRongBot:
             cached_k = self._cached_result_btns.get("btn_keep.png")
             if cached_k is not None:
                 if not self.should_stop():
-                    self.input.click(cached_k[0], cached_k[1], post_delay=0.14 * self._spd, stop_check=self.should_stop)
+                    self.input.click(cached_k[0], cached_k[1], post_delay=0.08 * self._spd, stop_check=self.should_stop)
                     if not self.should_stop():
                         self.stats.kept += 1
                         keep_succeeded = True
@@ -1568,7 +1581,7 @@ class DaoRongBot:
             cached_s = self._cached_result_btns.get("btn_sell.png")
             clicked_s = False
             if cached_s is not None:
-                self.input.click(cached_s[0], cached_s[1], post_delay=0.14 * self._spd, stop_check=self.should_stop)
+                self.input.click(cached_s[0], cached_s[1], post_delay=0.08 * self._spd, stop_check=self.should_stop)
                 clicked_s = True
             else:
                 res_s = self._click_ui("btn_sell.png", timeout=4.0, post_delay=0.14 * self._spd)
@@ -2034,6 +2047,7 @@ class DaoRongBot:
         bottom_hit_count = 0
         dust_fail_count = 0
         tab_fix_count = 0
+        cached_dust_btn: Optional[Tuple[int, int]] = None
         skipped_pts: List[Tuple[int, int]] = []
 
         while not self.should_stop():
@@ -2110,7 +2124,7 @@ class DaoRongBot:
                 pre_pv_box = screen[int(sh0 * 0.25):int(sh0 * 0.45), int(sw0 * 0.27):int(sw0 * 0.41)].copy()
 
                 self.log(f"[HÓA BỤI] {col_side} ({chosen.score:.2f}) -> Click giữa rồng ({click_x}, {click_y}).")
-                self.input.click(click_x, click_y, post_delay=0.45 * self._spd, stop_check=self.should_stop)
+                self.input.click(click_x, click_y, post_delay=0.25 * self._spd, stop_check=self.should_stop)
 
                 # Chờ tối đa 4 khung hình để ô Xem Trước bên trái tải xong ảnh rồng vừa chọn!
                 pv_matched = False
@@ -2140,7 +2154,13 @@ class DaoRongBot:
                     skipped_pts.append((chosen.x, chosen.y))
                     continue
 
-                res_dust = self._click_ui("btn_dust.png", timeout=3.0, retries=1, post_delay=0.4 * self._spd)
+                if cached_dust_btn is not None:
+                    self.input.click(cached_dust_btn[0], cached_dust_btn[1], post_delay=0.22 * self._spd, stop_check=self.should_stop)
+                    res_dust = MatchResult(found=True, name="btn_dust.png", score=1.0, x=cached_dust_btn[0], y=cached_dust_btn[1])
+                else:
+                    res_dust = self._click_ui("btn_dust.png", timeout=3.0, retries=1, post_delay=0.24 * self._spd)
+                    if res_dust and res_dust.found:
+                        cached_dust_btn = (res_dust.x, res_dust.y)
                 if not (res_dust and res_dust.found):
                     rb_fix = self.vision.find_template(self._ui("btn_dust_bottle.png"), threshold=0.70)
                     if rb_fix.found:
@@ -2162,8 +2182,17 @@ class DaoRongBot:
                     if self.should_stop():
                         break
                     res_cf = self._click_ui(
-                        "btn_dust_confirm.png", timeout=2.6, retries=1, post_delay=0.45 * self._spd
+                        "btn_dust_confirm.png", timeout=2.2, retries=1, post_delay=0.22 * self._spd
                     )
+                    if not (res_cf and res_cf.found) and cached_dust_btn is not None and not self.should_stop():
+                        # Nếu bấm theo tọa độ lưu chưa bật bảng xác nhận -> xóa cache và tìm lại nút Hóa Bụi chuẩn!
+                        cached_dust_btn = None
+                        res_dust2 = self._click_ui("btn_dust.png", timeout=2.2, retries=1, post_delay=0.24 * self._spd)
+                        if res_dust2 and res_dust2.found:
+                            cached_dust_btn = (res_dust2.x, res_dust2.y)
+                            res_cf = self._click_ui(
+                                "btn_dust_confirm.png", timeout=2.2, retries=1, post_delay=0.22 * self._spd
+                            )
                     if res_cf and res_cf.found and not self.should_stop():
                         dust_fail_count = 0
                         self.stats.dusted += 1

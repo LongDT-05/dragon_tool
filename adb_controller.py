@@ -54,6 +54,7 @@ class AdbController:
         self.base_dir = Path(base_dir) if base_dir else Path.cwd()
         self.custom_adb_path = custom_adb_path.strip()
         self._adb_path: Optional[str] = None
+        self._capture_mode: Dict[str, str] = {}
 
     def find_adb_executable(self) -> Optional[str]:
         custom = (self.custom_adb_path or "").strip()
@@ -175,35 +176,39 @@ class AdbController:
     def capture_screen(self, serial: str) -> Optional[np.ndarray]:
         """
         Chụp màn hình trực tiếp từ framebuffer Android (nhanh ~60-120ms, không cần hiện cửa sổ).
-        Thử định dạng raw RGBA trước (rất nhanh), dự phòng PNG nếu định dạng header khác.
+        Tự ghi nhớ định dạng chụp nhanh nhất theo từng thiết bị để tránh thử lỗi 2 lần mỗi khung.
         """
-        try:
-            proc = self._run(["exec-out", "screencap"], serial=serial, timeout=4.0)
-            raw = proc.stdout
-            if len(raw) >= 16:
-                w, h, fmt = struct.unpack("<III", raw[:12])
-                if 200 <= w <= 4096 and 200 <= h <= 4096 and fmt == 1:
-                    expected = w * h * 4
-                    # Android 8+ header có thể là 12 hoặc 16 bytes
-                    for hdr in (16, 12):
-                        if len(raw) >= hdr + expected:
-                            arr = np.frombuffer(raw, dtype=np.uint8, count=expected, offset=hdr)
-                            rgba = arr.reshape((h, w, 4))
-                            return cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
-        except Exception:
-            pass
-
-        # Dự phòng: screencap -p (PNG)
-        try:
-            proc = self._run(["exec-out", "screencap", "-p"], serial=serial, timeout=5.0)
-            buf = proc.stdout
-            if buf:
-                arr = np.frombuffer(buf, dtype=np.uint8)
-                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if img is not None:
-                    return img
-        except Exception:
-            pass
+        mode = self._capture_mode.get(serial, "raw")
+        order = ("raw", "png") if mode == "raw" else ("png", "raw")
+        for m in order:
+            if m == "raw":
+                try:
+                    proc = self._run(["exec-out", "screencap"], serial=serial, timeout=4.0)
+                    raw = proc.stdout
+                    if len(raw) >= 16:
+                        w, h, fmt = struct.unpack("<III", raw[:12])
+                        if 200 <= w <= 4096 and 200 <= h <= 4096 and fmt == 1:
+                            expected = w * h * 4
+                            for hdr in (16, 12):
+                                if len(raw) >= hdr + expected:
+                                    arr = np.frombuffer(raw, dtype=np.uint8, count=expected, offset=hdr)
+                                    rgba = arr.reshape((h, w, 4))
+                                    self._capture_mode[serial] = "raw"
+                                    return cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
+                except Exception:
+                    pass
+            else:
+                try:
+                    proc = self._run(["exec-out", "screencap", "-p"], serial=serial, timeout=5.0)
+                    buf = proc.stdout
+                    if buf:
+                        arr = np.frombuffer(buf, dtype=np.uint8)
+                        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                        if img is not None:
+                            self._capture_mode[serial] = "png"
+                            return img
+                except Exception:
+                    pass
         return None
 
     def tap(self, serial: str, x: int, y: int, jitter_px: int = 4) -> None:
