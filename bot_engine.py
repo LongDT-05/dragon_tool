@@ -1844,12 +1844,12 @@ class DaoRongBot:
     # Bước 8: Quét đủ 2 cột Hóa Bụi & tự phát hiện chạm đáy
     # ------------------------------------------------------------------
     def _get_padded_dust_roi(self) -> List[float]:
-        raw = self._drag_cfg("dust_list_roi", [0.62, 0.18, 0.92, 0.86])
+        raw = self._drag_cfg("dust_list_roi", [0.62, 0.16, 0.92, 0.86])
         return [
             max(0.0, float(raw[0]) - 0.02),
-            max(0.0, float(raw[1]) - 0.01),
+            max(0.0, min(0.155, float(raw[1]) - 0.015)),
             min(1.0, float(raw[2]) + 0.015),
-            min(1.0, float(raw[3])),
+            min(1.0, max(0.86, float(raw[3]))),
         ]
 
     def _is_card_locked(self, screen, rect, badge_x: int, badge_y: int, badge_w: int = 0, badge_h: int = 0) -> bool:
@@ -1902,8 +1902,18 @@ class DaoRongBot:
                 return val
         return None
 
-    def _is_card_protected(self, screen, rect, badge_x: int, badge_y: int, badge_w: int = 60, badge_h: int = 40) -> bool:
-        """Kiểm tra thẻ rồng có khớp với ảnh nào trong thư mục templates/protect_dust (Cấm Hóa Bụi) không."""
+    def _is_card_protected(
+        self,
+        screen,
+        rect,
+        badge_x: int,
+        badge_y: int,
+        badge_w: int = 60,
+        badge_h: int = 40,
+        card_star: Optional[int] = None,
+    ) -> bool:
+        """Kiểm tra thẻ rồng có khớp với ảnh nào trong thư mục templates/protect_dust (Cấm Hóa Bụi) không.
+        Nếu tên file mẫu có ghi số sao (vd: 'Rồng Lửa Đỏ 3 sao'), chỉ bảo vệ đúng rồng có số sao đó."""
         if not self.protect_dust_dir.is_dir():
             return False
         prot_files = [p for p in self.protect_dust_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
@@ -1918,13 +1928,22 @@ class DaoRongBot:
         sub = screen[card_top:y2, card_left:x2]
         if sub.size == 0:
             return False
+        star_checked = card_star is not None
+        cur_star = card_star
         for pf in prot_files:
             tpl = self.vision._load_template(pf, target_rect=rect)
             if tpl is None or sub.shape[0] < tpl.shape[0] or sub.shape[1] < tpl.shape[1]:
                 continue
             res = cv2.matchTemplate(sub, tpl, cv2.TM_CCOEFF_NORMED)
             _, mv, _, _ = cv2.minMaxLoc(res)
-            if float(mv) >= 0.84:
+            if float(mv) >= 0.85:
+                prot_star = extract_stars(pf.stem)
+                if prot_star is not None:
+                    if not star_checked:
+                        cur_star = self._read_card_star(screen, rect, badge_x, badge_y, badge_w, badge_h)
+                        star_checked = True
+                    if cur_star is not None and int(cur_star) != int(prot_star):
+                        continue
                 return True
         return False
 
@@ -1956,7 +1975,7 @@ class DaoRongBot:
             if tpl_img is None or crop.shape[0] < tpl_img.shape[0] or crop.shape[1] < tpl_img.shape[1]:
                 continue
             th, tw = tpl_img.shape[:2]
-            badge_thr = thr if rar_name == "Nguyên Liệu" else max(0.78, thr)
+            badge_thr = min(thr, 0.64) if rar_name == "Nguyên Liệu" else max(0.78, thr)
             res_map = cv2.matchTemplate(crop, tpl_img, cv2.TM_CCOEFF_NORMED)
             ys, xs = np.where(res_map >= badge_thr)
             cands = sorted(
@@ -2072,7 +2091,7 @@ class DaoRongBot:
                 click_y = max(rect.top + roi_px[1] + 6, min(rect.top + roi_px[3] - 6, chosen.y + dy))
 
                 # Xác minh lại ngay trước khi bấm Hóa Bụi: kiểm tra khóa / cấm bụi trên khung hình tươi!
-                if self._is_card_locked(screen, rect, chosen.x, chosen.y, chosen.w, chosen.h) or self._is_card_protected(screen, rect, chosen.x, chosen.y, chosen.w, chosen.h):
+                if self._is_card_locked(screen, rect, chosen.x, chosen.y, chosen.w, chosen.h) or self._is_card_protected(screen, rect, chosen.x, chosen.y, chosen.w, chosen.h, card_star=chosen_star):
                     self.log("🛡️ [XÁC MINH LẠI] Thẻ vừa chọn có dấu bảo vệ/khóa -> Bỏ qua an toàn!")
                     skipped_pts.append((chosen.x, chosen.y))
                     continue
