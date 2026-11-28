@@ -986,10 +986,10 @@ class DaoRongBot:
                 can_swipe = False
         full_limit = max(1, int(self._drag_cfg("max_parent_scrolls", 40)))
         if self.vision.is_adb_mode:
-            # Kéo chậm (~1.2s) để triệt tiêu quán tính cuộn lố trên Android ScrollView, chờ 0.60s đứng khung hẳn rồi mới quét
-            drag_dur = 1.05 * self._spd
-            hold_end = 0.15
-            settle = 0.60 * self._spd
+            # Kéo cực êm giữ vận tốc <= 205 px/s (không bị rút ngắn khi chọn tốc độ Nhanh) để triệt tiêu quán tính trôi trên Android ScrollView
+            drag_dur = 1.55
+            hold_end = 0.10
+            settle = max(0.55, 0.55 * self._spd)
         else:
             drag_dur = 0.65 * self._spd
             hold_end = 0.18
@@ -1191,8 +1191,9 @@ class DaoRongBot:
                     return False
                 rem_lbl = " & ".join(lb for lb, _ in need)
                 self.log_tech(f"[THANH RỒNG] {dir_name} ({step}/{limit}) tìm {rem_lbl}...")
+                step_dur = max(drag_dur, abs(x2 - x1) / 205.0) if self.vision.is_adb_mode else drag_dur
                 self.input.smooth_drag(
-                    x1, y1, x2, y2, duration=drag_dur, hold_end=hold_end, stop_check=self.should_stop
+                    x1, y1, x2, y2, duration=step_dur, hold_end=hold_end, stop_check=self.should_stop
                 )
                 self.input.sleep_interruptible(settle, self.should_stop)
 

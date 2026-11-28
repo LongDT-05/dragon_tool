@@ -57,13 +57,17 @@ class AdbController:
 
     def find_adb_executable(self) -> Optional[str]:
         custom = (self.custom_adb_path or "").strip()
-        # Đường dẫn người dùng chọn chỉ có hiệu lực khi còn được cấu hình.
-        if custom and Path(custom).is_file():
-            return custom
+        if custom:
+            if Path(custom).is_file():
+                self._adb_path = custom
+                return custom
+            self._adb_path = None
         if self._adb_path and Path(self._adb_path).is_file():
             return self._adb_path
 
         candidates: List[str] = []
+        if self.custom_adb_path:
+            candidates.append(self.custom_adb_path)
 
         # Kiểm tra thư mục ./adb/ cạnh tool trước
         local_adb = self.base_dir / "adb" / "adb.exe"
@@ -226,7 +230,9 @@ class AdbController:
         def _j(v: int) -> int:
             return max(1, int(v + random.randint(-jitter_px, jitter_px))) if jitter_px > 0 else max(1, int(v))
 
-        dur = max(120, int(duration_ms * random.uniform(0.90, 1.12)))
+        j_lo = 0.98 if duration_ms >= 1000 else 0.90
+        dur = max(120, int(duration_ms * random.uniform(j_lo, 1.08)))
+        swipe_timeout = max(8.0, (dur / 1000.0) + 6.0)
         proc = self._run(
             [
                 "shell",
@@ -239,7 +245,7 @@ class AdbController:
                 str(dur),
             ],
             serial=serial,
-            timeout=4.0,
+            timeout=swipe_timeout,
         )
         if proc.returncode != 0:
             err = proc.stderr.decode("utf-8", errors="ignore").strip() or proc.stdout.decode("utf-8", errors="ignore").strip()
