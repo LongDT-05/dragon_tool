@@ -1911,10 +1911,10 @@ class DaoRongBot:
             return False
         sx = rect.width / 1330.0
         sy = rect.height / 761.0
-        card_left = max(0, (badge_x - rect.left) - max(badge_w // 2, int(28 * sx)))
-        card_top = max(0, (badge_y - rect.top) - max(badge_h // 2, int(18 * sy)))
-        x2 = min(rect.width, int(card_left + 175 * sx))
-        y2 = min(rect.height, int(card_top + 105 * sy))
+        card_left = max(0, (badge_x - rect.left) - max(badge_w // 2, int(45 * sx)))
+        card_top = max(0, (badge_y - rect.top) - max(badge_h // 2, int(30 * sy)))
+        x2 = min(rect.width, int(card_left + 215 * sx))
+        y2 = min(rect.height, int(card_top + 145 * sy))
         sub = screen[card_top:y2, card_left:x2]
         if sub.size == 0:
             return False
@@ -1924,7 +1924,7 @@ class DaoRongBot:
                 continue
             res = cv2.matchTemplate(sub, tpl, cv2.TM_CCOEFF_NORMED)
             _, mv, _, _ = cv2.minMaxLoc(res)
-            if float(mv) >= 0.88:
+            if float(mv) >= 0.84:
                 return True
         return False
 
@@ -2076,38 +2076,31 @@ class DaoRongBot:
                     self.log("🛡️ [XÁC MINH LẠI] Thẻ vừa chọn có dấu bảo vệ/khóa -> Bỏ qua an toàn!")
                     skipped_pts.append((chosen.x, chosen.y))
                     continue
-                # Lưu bảng màu thẻ dự kiến trước khi click để đối chiếu với khung Xem Trước bên trái sau khi click!
-                sx_c, sy_c = rect.width / 1330.0, rect.height / 761.0
-                c_l = max(0, (chosen.x - rect.left) - int(28 * sx_c))
-                c_t = max(0, (chosen.y - rect.top) - int(18 * sy_c))
-                pre_card_box = screen[c_t:min(rect.height, c_t + int(115 * sy_c)), c_l:min(rect.width, c_l + int(145 * sx_c))]
-                pre_card_hist = self._dragon_hsv_hist(pre_card_box)
+                # Lưu khung Xem Trước bên trái trước khi click để xác nhận sau khi click ô Xem Trước có rồng thật (không trống/đen)
+                sh0, sw0 = screen.shape[:2]
+                pre_pv_box = screen[int(sh0 * 0.25):int(sh0 * 0.45), int(sw0 * 0.27):int(sw0 * 0.41)].copy()
 
                 self.log(f"[HÓA BỤI] {col_side} ({chosen.score:.2f}) -> Click giữa rồng ({click_x}, {click_y}).")
                 self.input.click(click_x, click_y, post_delay=0.45 * self._spd, stop_check=self.should_stop)
 
                 # Chờ tối đa 4 khung hình để ô Xem Trước bên trái tải xong ảnh rồng vừa chọn!
-                if pre_card_hist is None:
-                    self.log("🛡️ [XÁC MINH SAU CLICK] Thẻ dự kiến không trích được mẫu màu -> Bỏ qua an toàn!")
-                    skipped_pts.append((chosen.x, chosen.y))
-                    continue
-
                 pv_matched = False
-                pv_reason = "ô Xem Trước chưa tải/trống"
+                pv_reason = "ô Xem Trước trống/chưa tải xong"
                 for _pv_try in range(4):
                     if self.should_stop():
                         break
                     post_scr, post_rect = self.vision.capture_window()
                     ph, pw = post_scr.shape[:2]
                     preview_box = post_scr[int(ph * 0.25):int(ph * 0.45), int(pw * 0.27):int(pw * 0.41)]
-                    preview_hist = self._dragon_hsv_hist(preview_box)
                     pv_max_std = max(float(preview_box[:, :, c].std()) for c in range(3)) if (preview_box.size > 0 and preview_box.ndim == 3) else (float(preview_box.std()) if preview_box.size > 0 else 0.0)
-                    if preview_box.size > 0 and pv_max_std >= 12.0 and preview_hist is not None:
-                        pv_sim = float(cv2.compareHist(pre_card_hist, preview_hist, cv2.HISTCMP_CORREL))
-                        if pv_sim >= 0.65:
+                    if preview_box.size > 0 and pv_max_std >= 12.0:
+                        pv_hsv = cv2.cvtColor(preview_box, cv2.COLOR_BGR2HSV) if preview_box.ndim == 3 else None
+                        has_sprite = True if pv_hsv is None else (float((pv_hsv[:, :, 2] > 95).mean()) >= 0.06 or float((pv_hsv[:, :, 1] > 85).mean()) >= 0.06)
+                        pv_changed = compute_frame_diff(pre_pv_box, preview_box) >= 2.0
+                        if has_sprite and (pv_changed or pv_max_std >= 18.0):
                             pv_matched = True
                             break
-                        pv_reason = f"khác thẻ dự kiến (khớp={pv_sim:.2f})"
+                        pv_reason = "ô Xem Trước chưa cập nhật rồng mới"
                     else:
                         pv_reason = "ô Xem Trước trống/chưa tải xong"
                     if _pv_try < 3:
