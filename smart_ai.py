@@ -13,6 +13,8 @@ Gồm 4 thành phần:
 from __future__ import annotations
 
 import json
+import os
+import threading
 import re
 import time
 from pathlib import Path
@@ -28,6 +30,13 @@ from vision import imread_unicode, imwrite_unicode
 # ======================================================================
 # 1. AI CÀI LUẬT BẰNG TIẾNG VIỆT TỰ NHIÊN (OFFLINE NLP)
 # ======================================================================
+def _atomic_write_json(path: Path, data: Any) -> None:
+    """Ghi file JSON nguyên tử (tmp -> os.replace) tránh hỏng file khi chạy nhiều acc hoặc mất điện."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 class NaturalRuleParser:
     """Phân tích câu lệnh tiếng Việt tự nhiên thành bộ luật bless / keep / sell chuẩn xác."""
 
@@ -60,32 +69,18 @@ class NaturalRuleParser:
     def _extract_star_condition(self, clause_raw: str) -> Tuple[str, Optional[int]]:
         raw_low = (clause_raw or "").lower()
         cn = normalize_vn(clause_raw)
-        operator = re.search(r"(>=|≥|>)\s*(\d+)", raw_low)
-        if re.search(r"[>≥]", raw_low) and operator is None:
-            return "invalid", None
-        has_ge = operator is not None or any(k in cn for k in ("tu ", "tro len", "lon hon", "tren "))
-        m_any_num = (
-            operator
-            if operator is not None
-            else re.search(r"(\d+)\s*sao\b", cn) or re.search(r"(\d+)", cn)
-        )
+        has_ge = (">=" in raw_low) or any(k in cn for k in ("tu ", "tro len", "lon hon", "tren "))
+        m_any_num = re.search(r"(\d+)", raw_low if ">=" in raw_low else cn)
         if m_any_num and has_ge:
-            digits = m_any_num.group(2 if operator is not None else 1)
-            if len(digits) > 2:
-                return "invalid", None
-            val = int(digits)
-            if (operator is not None and operator.group(1) == ">") or (
-                operator is None and ("tren " in cn or "lon hon" in cn) and "tro len" not in cn and "tu " not in cn
-            ):
+            val = int(m_any_num.group(1))
+            if ("tren " in cn or "lon hon" in cn) and "tro len" not in cn and ">=" not in raw_low and "tu " not in cn:
                 val += 1
             if 1 <= val <= 40:
                 return ">=", val
             return "invalid", None
 
-        m_eq = re.search(r"(\d+)\s*(?:sao\b|[★⭐*])", raw_low)
+        m_eq = re.search(r"(?:dung\s*|=\s*|\(\s*)?(\d+)\s*(?:sao|\*|★)", raw_low if "★" in raw_low else cn)
         if m_eq:
-            if len(m_eq.group(1)) > 2:
-                return "invalid", None
             val = int(m_eq.group(1))
             if 1 <= val <= 40:
                 return "=", val
@@ -118,19 +113,6 @@ class NaturalRuleParser:
         raw = (text or "").strip()
         if not raw:
             return {"rules": result, "summary": [], "matched_count": 0}
-        normalized = normalize_vn(raw)
-        negated = re.search(r"\b(?:tru|dung (?:ban|cat|giu|chuc phuc|hoa bui)|khong (?:duoc )?(?:ban|cat|giu|chuc phuc|hoa bui))\b", normalized)
-        unsupported_stars = re.search(
-            r"\b(?:duoi|toi da|it hon|khong qua)\s+[0-9]+\b"
-            r"|\b[0-9]+\s*sao\s+tro xuong\b|\b[0-9]+\s+den\s+[0-9]+\s*sao\b",
-            normalized,
-        ) or re.search(r"[<≤]|\b[0-9]+\s*[-–]\s*[0-9]+\s*sao\b", raw)
-        if negated or unsupported_stars:
-            error = (
-                "Hãy ghi rõ từng nhóm rồng cần Bán, Cất hoặc Chúc phúc. Câu có phủ định hoặc ngoại lệ chưa được hỗ trợ."
-                if negated else "Hãy chọn mọi sao, đúng số sao hoặc từ một mức sao trở lên."
-            )
-            return {"rules": result, "summary": [], "matched_count": 0, "error": error}
 
         # Tách câu theo dấu phẩy, xuống dòng VÀ liên từ (còn lại/nhưng/riêng/trừ khi) TRƯỚC khi bỏ dấu
         # để mỗi mệnh đề giữ nguyên ký hiệu '>=', '★' riêng của nó, không rò sang mệnh đề khác!
@@ -152,10 +134,7 @@ class NaturalRuleParser:
             last_action = act
             star_op, star_val = self._extract_star_condition(clause)
             if star_op == "invalid":
-                return {
-                    "rules": {"bless": [], "keep": [], "sell": []}, "summary": [], "matched_count": 0,
-                    "error": "Điều kiện sao phải là một số từ 1 đến 40.",
-                }
+                continue
 
             matched_names: List[str] = []
             # 1. Tìm tên rồng cụ thể trong mệnh đề
@@ -224,6 +203,7 @@ class PersistentNameCache:
         self._entries: Dict[str, Dict[str, Any]] = {}
         self._images: Dict[str, np.ndarray] = {}
         self._sigs: Dict[str, np.ndarray] = {}
+        self._lock = threading.RLock()
         self._load()
 
     @staticmethod
@@ -261,12 +241,11 @@ class PersistentNameCache:
             self._sigs.clear()
 
     def _save_index(self) -> None:
-        try:
-            self.index_path.write_text(
-                json.dumps(self._entries, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        except Exception:
-            pass
+        with self._lock:
+            try:
+                _atomic_write_json(self.index_path, self._entries)
+            except Exception:
+                pass
 
     @property
     def count(self) -> int:
@@ -367,9 +346,11 @@ class AnchorAutoCalibrator:
     def __init__(self, pad_rel: float = 0.09):
         self.pad_rel = pad_rel
         self._anchors: Dict[str, Tuple[float, float]] = {}
+        self._lock = threading.RLock()
 
     def get_roi(self, mode_key: str, btn_name: str) -> Optional[List[float]]:
-        pos = self._anchors.get(f"{mode_key}:{btn_name}")
+        with self._lock:
+            pos = self._anchors.get(f"{mode_key}:{btn_name}")
         if pos is None:
             return None
         rx, ry = pos
@@ -392,6 +373,7 @@ class PairStatsTracker:
     def __init__(self, stats_path: Path):
         self.stats_path = Path(stats_path)
         self.data: Dict[str, Dict[str, int]] = {}
+        self._lock = threading.RLock()
         self._load()
 
     def _load(self) -> None:
@@ -404,12 +386,11 @@ class PairStatsTracker:
                 self.data = {}
 
     def _save(self) -> None:
-        try:
-            self.stats_path.write_text(
-                json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        except Exception:
-            pass
+        with self._lock:
+            try:
+                _atomic_write_json(self.stats_path, self.data)
+            except Exception:
+                pass
 
     @staticmethod
     def make_pair_key(p1: str, p2: str) -> str:

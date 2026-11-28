@@ -40,6 +40,19 @@ from updater import CURRENT_VERSION
 from vision import MatchResult, VisionEngine, WindowRect, compute_frame_diff, compute_frame_similarity, imread_unicode
 
 
+def _trim_memory() -> None:
+    """Dọn rác Python và trả trang RAM rảnh về Windows (EmptyWorkingSet) an toàn."""
+    gc.collect()
+    try:
+        import os as _os
+        if _os.name == "nt":
+            import ctypes as _ct
+            h = _ct.windll.kernel32.GetCurrentProcess()
+            _ct.windll.psapi.EmptyWorkingSet(h)
+    except Exception:
+        pass
+
+
 class BotState(str, Enum):
     OPEN_BREED = "Mở giao diện lai (Chống rồng che trứng)"
     SELECT_PARENTS = "Chọn 2 rồng bố mẹ"
@@ -1174,7 +1187,7 @@ class DaoRongBot:
             for step in range(1, limit + 1):
                 if picked_count >= 2 or not need:
                     return True
-                if not self.wait_if_paused():
+                if not self.wait_if_paused() or self._need_rescan or self._need_restart:
                     return False
                 if self._check_bag_full(prev_scr, prev_rect):
                     return False
@@ -1270,6 +1283,12 @@ class DaoRongBot:
             if not res.found:
                 res = self.vision.find_template(sb_path, threshold=self._conf("button", 0.76))
             if res.found:
+                try:
+                    cur_r_sb = self.vision.get_window_rect()
+                    if cur_r_sb is not None:
+                        self.calibrator.record(self._mode_key, "btn_start_breed.png", *cur_r_sb.abs_to_rel(res.x, res.y))
+                except Exception:
+                    pass
                 self.log_tech(f"[LAI RỒNG] Click 'Lai Rồng' ({res.x}, {res.y}).")
                 self.input.click(res.x, res.y, post_delay=0.10, stop_check=self.should_stop)
             else:
@@ -1348,8 +1367,14 @@ class DaoRongBot:
         text_rules = self.config.get("dragon_text_rules", {})
         has_rules = any(bool(text_rules.get(k)) for k in ("bless", "keep", "sell"))
 
+        # Nghỉ nhẹ 1.8s đầu trong lúc hiệu ứng vỡ trứng đang chạy để tránh spam ADB screencap gây lag giả lập
+        if self.vision.is_adb_mode:
+            self.input.sleep_interruptible(1.8, self.should_stop)
+
         while time.monotonic() < deadline:
             if not self.wait_if_paused():
+                return BotState.OPEN_BREED
+            if self._need_rescan or self._need_restart:
                 return BotState.OPEN_BREED
 
             screen, rect = self.vision.capture_window()
@@ -1388,10 +1413,10 @@ class DaoRongBot:
                     self._breed_counted_for_cycle = True
                     self.on_stats(self.stats)
                     if self.stats.breeds % 20 == 0:
-                        gc.collect()
+                        _trim_memory()
                 return BotState.CLASSIFY_AND_ACT
 
-            time.sleep(0.035)
+            time.sleep(0.10 if self.vision.is_adb_mode else 0.035)
 
         self.log("[PHỤC HỒI] Chờ kết quả quá lâu -> Kiểm tra lại nút 'Lai Rồng' hoặc trạng thái bảng.")
         self.stats.recoveries += 1
@@ -2057,6 +2082,36 @@ class DaoRongBot:
         tab_fix_count = 0
         cached_dust_btn: Optional[Tuple[int, int]] = None
         skipped_pts: List[Tuple[int, int]] = []
+        # Bộ nhớ dấu vân tay ảnh nhỏ (64x48) cho thẻ Cấm Hóa Bụi / Khóa / Vượt sao đứng yên tại chỗ (bỏ qua trong 0.1ms nếu không đổi pixel!)
+        safe_slot_cache: List[Tuple[int, int, np.ndarray]] = []
+
+        def _slot_fingerprint(scr_img: np.ndarray, rct: WindowRect, cx: int, cy: int) -> Optional[np.ndarray]:
+            lx, ly = cx - rct.left, cy - rct.top
+            x1, y1 = max(0, lx - 24), max(0, ly - 16)
+            x2, y2 = min(scr_img.shape[1], lx + 88), min(scr_img.shape[0], ly + 68)
+            if x2 - x1 < 20 or y2 - y1 < 20:
+                return None
+            return cv2.resize(scr_img[y1:y2, x1:x2], (64, 48), interpolation=cv2.INTER_AREA)
+
+        def _is_cached_safe_slot(scr_img: np.ndarray, rct: WindowRect, cx: int, cy: int) -> bool:
+            if not safe_slot_cache:
+                return False
+            fp = _slot_fingerprint(scr_img, rct, cx, cy)
+            if fp is None:
+                return False
+            for sx_c, sy_c, ref_fp in safe_slot_cache:
+                if abs(cx - sx_c) < 22 and abs(cy - sy_c) < 22:
+                    if compute_frame_diff(ref_fp, fp) < 2.5:
+                        return True
+            return False
+
+        def _remember_safe_slot(scr_img: np.ndarray, rct: WindowRect, cx: int, cy: int) -> None:
+            fp = _slot_fingerprint(scr_img, rct, cx, cy)
+            if fp is not None:
+                safe_slot_cache[:] = [item for item in safe_slot_cache if not (abs(cx - item[0]) < 22 and abs(cy - item[1]) < 22)]
+                safe_slot_cache.append((cx, cy, fp))
+                if len(safe_slot_cache) > 16:
+                    safe_slot_cache.pop(0)
 
         while not self.should_stop():
             if not self.wait_if_paused():
@@ -2076,12 +2131,17 @@ class DaoRongBot:
             for cand in candidates:
                 if any(abs(cand.x - sx) < 30 and abs(cand.y - sy) < 30 for sx, sy in skipped_pts):
                     continue
+                if _is_cached_safe_slot(screen, rect, cand.x, cand.y):
+                    skipped_pts.append((cand.x, cand.y))
+                    continue
                 if self._is_card_locked(screen, rect, cand.x, cand.y, cand.w, cand.h):
                     self.log(f"[HÓA BỤI] Bỏ qua rồng đang bị khóa (🔒) tại ({cand.x}, {cand.y}).")
+                    _remember_safe_slot(screen, rect, cand.x, cand.y)
                     skipped_pts.append((cand.x, cand.y))
                     continue
                 if self._is_card_protected(screen, rect, cand.x, cand.y, cand.w, cand.h):
                     self.log(f"🛡️ [CẤM HÓA BỤI] Bỏ qua rồng cũ được bảo vệ tại ({cand.x}, {cand.y}).")
+                    _remember_safe_slot(screen, rect, cand.x, cand.y)
                     skipped_pts.append((cand.x, cand.y))
                     continue
 
@@ -2094,6 +2154,7 @@ class DaoRongBot:
                         continue
                     if dust_max_star > 0 and c_star > dust_max_star:
                         self.log(f"🛡️ [HÓA BỤI] Chừa lại rồng [{cand.name}] {c_star}★ (> mức tối đa {dust_max_star}★).")
+                        _remember_safe_slot(screen, rect, cand.x, cand.y)
                         skipped_pts.append((cand.x, cand.y))
                         continue
                     if use_ledger:
@@ -2221,8 +2282,9 @@ class DaoRongBot:
                         skipped_pts.append((chosen.x, chosen.y))
                 continue
 
-            # Chuẩn bị cuộn xuống -> xóa danh sách tọa độ bỏ qua của khung hình cũ
+            # Chuẩn bị cuộn xuống -> xóa danh sách tọa độ bỏ qua & dấu vân tay ô của khung hình cũ
             skipped_pts.clear()
+            safe_slot_cache.clear()
 
             empty_scrolls += 1
             if empty_scrolls > max_scrolls:
@@ -2258,7 +2320,7 @@ class DaoRongBot:
             else:
                 bottom_hit_count = 0
 
-        gc.collect()
+        _trim_memory()
         return BotState.RETURN_TO_EGG_ISLAND
 
     # ------------------------------------------------------------------
@@ -2344,6 +2406,9 @@ class DaoRongBot:
                 self._wd_last_change_ts = now
             elif now - self._wd_last_change_ts >= wd_sec:
                 self._wd_last_change_ts = now
+                if self._watchdog_check_and_relaunch():
+                    self._need_rescan = True
+                    return
                 self._trigger_alert_and_pause(
                     "Màn hình game đứng yên quá lâu",
                     f"Màn hình không thay đổi trong {int(wd_sec)} giây (có thể mất mạng hoặc đơ giả lập). Hãy kiểm tra lại game!",
