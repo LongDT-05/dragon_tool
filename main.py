@@ -20,7 +20,6 @@ from tkinter import filedialog, messagebox, simpledialog
 from typing import Any, Dict, List, Optional
 
 import customtkinter as ctk
-from PIL import Image
 
 try:
     import keyboard
@@ -775,7 +774,6 @@ class DaoRongStudioV10(ctk.CTk):
         self.var_save_rare = tk.BooleanVar(value=bool(self.config_data.get("save_rare_snapshots", True)))
         self.var_sound_alert = tk.BooleanVar(value=bool(self.config_data.get("sound_alert", True)))
         self.var_verbose_log = tk.BooleanVar(value=bool(self.config_data.get("verbose_log", False)))
-        self.var_collect_ai = tk.BooleanVar(value=bool(self.config_data.get("collect_ai_dataset", False)))
         self.var_watchdog_relaunch = tk.BooleanVar(value=bool(self.config_data.get("watchdog_relaunch", True)))
         self.var_remote_notify = tk.BooleanVar(value=bool(self.config_data.get("enable_remote_notify", False)))
         self.var_dc_webhook = tk.StringVar(value=str(self.config_data.get("discord_webhook", "")))
@@ -1406,7 +1404,6 @@ class DaoRongStudioV10(ctk.CTk):
         self.config_data["save_rare_snapshots"] = bool(self.var_save_rare.get())
         self.config_data["sound_alert"] = bool(self.var_sound_alert.get())
         self.config_data["verbose_log"] = bool(self.var_verbose_log.get())
-        self.config_data["collect_ai_dataset"] = bool(self.var_collect_ai.get())
         self.config_data["watchdog_relaunch"] = bool(self.var_watchdog_relaunch.get())
         self.config_data["enable_remote_notify"] = bool(self.var_remote_notify.get())
         self.config_data["discord_webhook"] = self.var_dc_webhook.get().strip()
@@ -1558,6 +1555,10 @@ class DaoRongStudioV10(ctk.CTk):
         for b in self.multi_bots.values():
             if b.is_running:
                 b.stop()
+        try:
+            self.adb_ctrl.close_all_shells()
+        except Exception:
+            pass
         self.lbl_badge.configure(text=" ● Đã dừng ", fg_color="#450A0A", text_color="#FCA5A5")
         self.btn_play_pause.configure(text="▶  BẮT ĐẦU (Ctrl+Enter)", fg_color=C["green"], text_color="#052E16")
 

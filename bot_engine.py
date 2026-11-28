@@ -34,7 +34,6 @@ from smart_ai import (
     PairStatsTracker,
     PersistentNameCache,
     RareMomentSaver,
-    TrainingDatasetCollector,
 )
 from yolo_vision import YoloLevel2Vision
 from updater import CURRENT_VERSION
@@ -1453,7 +1452,10 @@ class DaoRongBot:
                 any(ch.isdigit() for ch in str(r))
                 for r in (text_rules.get("bless", ""), text_rules.get("keep", ""), text_rules.get("sell", ""))
             )
-            if star_ok and c_stars is not None and need_star_verify:
+            # Chỉ gọi lại OCR xác minh sao khi hành động là Bán/Chúc phúc hoặc độ khớp chưa đạt >= 0.93
+            # (với Cất túi đã khớp pixel >= 0.93 cả vùng tên lẫn vùng sao -> Cất ngay 0ms, giảm 3-4s/lượt!)
+            must_ocr_g1 = need_star_verify and (pre_act in ("sell", "bless") or c_sc < 0.93)
+            if star_ok and c_stars is not None and must_ocr_g1:
                 if not self.text_matcher.is_available:
                     star_ok = False
                 else:
@@ -1481,12 +1483,15 @@ class DaoRongBot:
             mem_hit = self.name_cache.match(name_crop, res_key, threshold=0.89)
             if mem_hit is not None:
                 c_name, c_rar, c_stars, c_sc = mem_hit
+                synth_txt = f"{c_name} ({c_stars} sao)" if c_stars else c_name
+                tm_mem = self.text_matcher.match_text_against_rules(synth_txt, text_rules)
                 need_star_verify2 = any(
                     any(ch.isdigit() for ch in str(r))
                     for r in (text_rules.get("bless", ""), text_rules.get("keep", ""), text_rules.get("sell", ""))
                 )
+                must_ocr_g2 = need_star_verify2 and (not tm_mem.found or tm_mem.category in ("sell", "bless") or c_sc < 0.93)
                 star_verified = True
-                if c_stars is not None and need_star_verify2:
+                if c_stars is not None and must_ocr_g2:
                     if not self.text_matcher.is_available:
                         star_verified = False
                         self.log_tech(f"[AI CACHE] Từ chối mẫu nhớ {c_stars}★ vì OCR không khả dụng để xác minh sao!")
@@ -1497,8 +1502,6 @@ class DaoRongBot:
                             self.log_tech(f"[AI CACHE] Từ chối mẫu nhớ {c_stars}★ (OCR hiện tại: {st_chk}★)!")
                 if star_verified:
                     self._last_identified = (c_name, c_rar, c_stars)
-                    synth_txt = f"{c_name} ({c_stars} sao)" if c_stars else c_name
-                    tm_mem = self.text_matcher.match_text_against_rules(synth_txt, text_rules)
                     if tm_mem.found:
                         action = tm_mem.category
                         dt_ms = (time.perf_counter() - t_start) * 1000.0
@@ -1818,6 +1821,12 @@ class DaoRongBot:
                     clicked_pos = (ra.x, ra.y)
                     self.config.setdefault("pins", {})["altar_rel"] = list(rect.abs_to_rel(ra.x, ra.y))
                     self.log(f"[TẨY TỦY] Thấy tháp tẩy tủy ({ra.score:.2f}) -> Click tại {clicked_pos}.")
+            if clicked_pos is None and attempt == 2 and self.yolo.ready:
+                ya = self.yolo.find_best(screen, "altar", conf_thr=0.48)
+                if ya is not None:
+                    clicked_pos = (rect.left + ya.cx, rect.top + ya.cy)
+                    self.config.setdefault("pins", {})["altar_rel"] = list(rect.abs_to_rel(*clicked_pos))
+                    self.log_tech(f"[AI CẤP 2 - DỰ PHÒNG] Tìm thấy Tháp xuyên rồng che ({ya.conf:.2f}) tại {clicked_pos}.")
 
             if clicked_pos is None:
                 px, py = rect.rel_to_abs(altar_rel[0], altar_rel[1])
@@ -1834,6 +1843,7 @@ class DaoRongBot:
                     bottle_path, timeout=1.0, threshold=0.70, stop_check=self.should_stop
                 )
                 if rb2.found:
+                    self.config.setdefault("pins", {})["altar_rel"] = list(rect.abs_to_rel(clicked_pos[0], clicked_pos[1]))
                     self.log(f"[HÓA BỤI] Đã mở bảng Tẩy Tủy -> Click bình Hóa Bụi ({rb2.x}, {rb2.y}).")
                     for b_try in range(1, 4):
                         self.input.click(rb2.x, rb2.y, post_delay=0.55 * self._spd, stop_check=self.should_stop)
