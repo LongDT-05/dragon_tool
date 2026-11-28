@@ -1621,22 +1621,14 @@ class DaoRongBot:
 
         # Ghi nhận vào Sổ Tay Rồng Vừa Lai (chỉ ghi con Cất thuộc độ hiếm cho phép Hóa Bụi; TUYỆT ĐỐI không ghi con Chúc phúc!)
         id_name, id_rarity, id_stars = getattr(self, "_last_identified", ("", "", None))
-        if keep_succeeded and id_rarity and id_stars is not None:
+        if keep_succeeded and id_rarity:
             enabled_dr = set(self.config.get("dust_rarities", ["Nguyên Liệu"]))
             max_st = int(self.config.get("dust_max_star", 0) or 0)
-            if id_rarity in enabled_dr and (max_st == 0 or id_stars <= max_st):
-                lkey = (id_rarity, int(id_stars))
+            if id_rarity in enabled_dr and (id_stars is None or max_st == 0 or id_stars <= max_st):
+                lkey = (id_rarity, int(id_stars) if id_stars is not None else -1)
                 self._session_dust_ledger[lkey] = self._session_dust_ledger.get(lkey, 0) + 1
-                # Lưu thêm bảng màu sprite rồng vừa lai để đối chiếu khi Hóa Bụi
-                try:
-                    sh_i, sw_i = screen.shape[:2]
-                    spr = screen[int(sh_i * 0.25):int(sh_i * 0.45), int(sw_i * 0.30):int(sw_i * 0.43)]
-                    shist = self._dragon_hsv_hist(spr)
-                    if shist is not None:
-                        self._session_dust_sprites.setdefault(lkey, []).append(shist)
-                except Exception:
-                    pass
-                self.log_tech(f"[SỔ HÓA BỤI] +1 ({id_rarity}, {id_stars}★) -> tổng chờ bụi: {sum(self._session_dust_ledger.values())}")
+                star_lbl = f"{id_stars}★" if id_stars is not None else "?★"
+                self.log_tech(f"[SỔ HÓA BỤI] +1 ({id_rarity}, {star_lbl}) -> tổng chờ bụi: {sum(self._session_dust_ledger.values())}")
         action_ok = keep_succeeded or sell_succeeded or bless_succeeded
         if action_ok and not getattr(self, "_pair_stats_recorded_for_cycle", False):
             self._pair_stats_recorded_for_cycle = True
@@ -2054,30 +2046,12 @@ class DaoRongBot:
                         skipped_pts.append((cand.x, cand.y))
                         continue
                     if use_ledger:
-                        lkey = (cand.name, int(c_star))
-                        if self._session_dust_ledger.get(lkey, 0) <= 0:
+                        lkey_exact = (cand.name, int(c_star))
+                        lkey_any = (cand.name, -1)
+                        if self._session_dust_ledger.get(lkey_exact, 0) <= 0 and self._session_dust_ledger.get(lkey_any, 0) <= 0:
                             self.log_tech(f"[SỔ HÓA BỤI] Bỏ qua rồng cũ [{cand.name} {c_star}★] (không nằm trong sổ vừa lai).")
                             skipped_pts.append((cand.x, cand.y))
                             continue
-                        spr_list = self._session_dust_sprites.get(lkey, [])
-                        if not spr_list:
-                            self.log(f"🛡️ [SỔ HÓA BỤI] Thiếu bằng chứng mẫu màu phiên cho {cand.name} {c_star}★ -> Bỏ qua an toàn!")
-                            skipped_pts.append((cand.x, cand.y))
-                            continue
-                        sx_d, sy_d = rect.width / 1330.0, rect.height / 761.0
-                        cl = max(0, (cand.x - rect.left) - int(28 * sx_d))
-                        ct = max(0, (cand.y - rect.top) - int(18 * sy_d))
-                        c_box = screen[ct:min(rect.height, ct + int(115 * sy_d)), cl:min(rect.width, cl + int(145 * sx_d))]
-                        c_hist = self._dragon_hsv_hist(c_box)
-                        if c_hist is not None:
-                            sims = [float(cv2.compareHist(c_hist, sh, cv2.HISTCMP_CORREL)) for sh in spr_list]
-                            best_idx = int(np.argmax(sims))
-                            best_sp = sims[best_idx]
-                            if best_sp < 0.72:
-                                self.log(f"🛡️ [SỔ HÓA BỤI] Bỏ qua thẻ trùng {cand.name} {c_star}★ nhưng khác màu rồng vừa lai (khớp={best_sp:.2f})!")
-                                skipped_pts.append((cand.x, cand.y))
-                                continue
-                            chosen_spr_idx = best_idx
 
                 chosen = cand
                 chosen_star = c_star
@@ -2172,13 +2146,12 @@ class DaoRongBot:
                         dust_fail_count = 0
                         self.stats.dusted += 1
                         if use_ledger and chosen_star is not None:
-                            lkey = (chosen.name, int(chosen_star))
-                            if self._session_dust_ledger.get(lkey, 0) > 0:
-                                self._session_dust_ledger[lkey] -= 1
-                            if chosen_spr_idx is not None and lkey in self._session_dust_sprites:
-                                lst_sp = self._session_dust_sprites[lkey]
-                                if 0 <= chosen_spr_idx < len(lst_sp):
-                                    lst_sp.pop(chosen_spr_idx)
+                            lkey_exact = (chosen.name, int(chosen_star))
+                            lkey_any = (chosen.name, -1)
+                            if self._session_dust_ledger.get(lkey_exact, 0) > 0:
+                                self._session_dust_ledger[lkey_exact] -= 1
+                            elif self._session_dust_ledger.get(lkey_any, 0) > 0:
+                                self._session_dust_ledger[lkey_any] -= 1
                         self.on_stats(self.stats)
                         skipped_pts.clear()
                         rem = sum(self._session_dust_ledger.values()) if use_ledger else -1
