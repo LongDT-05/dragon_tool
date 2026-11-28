@@ -1061,8 +1061,8 @@ class DaoRongBot:
         def _try_pick_visible(scr: np.ndarray, rct: WindowRect) -> Tuple[np.ndarray, WindowRect]:
             nonlocal need, picked_count
             cur_scr, cur_rct = scr, rct
-            # Lặp tối đa 2 lần nếu cả 2 rồng bố mẹ đang nằm ngay cạnh nhau trên cùng 1 màn hình!
-            for _ in range(2):
+            # Lặp tối đa 3 lần để bắt trọn cả 2 rồng bố mẹ nếu nằm cạnh nhau (hoặc rồng 2 vừa trượt vào chỗ trống sau khi chọn rồng 1)!
+            for _pick_round in range(3):
                 if picked_count >= 2 or not need:
                     need.clear()
                     break
@@ -1130,6 +1130,10 @@ class DaoRongBot:
                         verified_slots[entered_slot] = pp.name
                         need = [(lb, p) for lb, p in need if lb != label]
                         picked_count = len(verified_slots)
+                        if need and not self.should_stop():
+                            # Đợi thanh rồng trượt ổn định sau khi rút 1 con lên ô để bắt ngay con thứ 2 nếu nằm sát bên!
+                            self.input.sleep_interruptible(max(0.38, 0.40 * self._spd), self.should_stop)
+                            cur_scr, cur_rct = self.vision.capture_window()
                 elif not patch_changed:
                     # Click không ăn -> thử lại 1 nhịp
                     break
@@ -1199,12 +1203,18 @@ class DaoRongBot:
 
                 after_scr, after_rect = self.vision.capture_window()
                 after_roi, _, _ = self.vision.crop_roi(after_scr, after_rect, roi)
+                picked_before_step = picked_count
                 prev_scr, prev_rect = _try_pick_visible(after_scr, after_rect)
                 if picked_count >= 2 and not need:
                     if _confirm_final_slots(prev_scr, prev_rect):
                         self.dir_memory.record(p1_path.name, p2_path.name, dir_code)
                         return True
                     return False
+                if picked_count > picked_before_step:
+                    # Vừa chọn được 1 con nên thanh rồng tự dồn lại -> reset bộ đếm mép để tiếp tục quét hết thanh!
+                    edge_gap_hits = 0
+                    stuck_count = 0
+                    continue
 
                 bar_diff = compute_frame_diff(before_roi, after_roi)
                 has_gap, g_br, g_sat, g_lap = self._detect_bottom_bar_edge_gap(after_scr, after_rect, edge_side)
@@ -1214,19 +1224,19 @@ class DaoRongBot:
                         f"[THANH RỒNG] Thấy khoảng trống mép {'phải' if edge_side == 'right' else 'trái'} "
                         f"({edge_gap_hits}/2 | br={g_br:.2f}, sat={g_sat:.2f}, lap={g_lap:.0f})."
                     )
-                    if edge_gap_hits >= 2 or bar_diff < 2.5:
+                    if edge_gap_hits >= 2:
                         self.log(
                             f"⚡ [THANH RỒNG] Đã kéo hết mép {'phải' if edge_side == 'right' else 'trái'} "
-                            f"(nhận diện khoảng trống sau {step} nhịp) -> Đổi chiều quét!"
+                            f"(xác nhận khoảng trống 2/2 sau {step} nhịp) -> Đổi chiều quét!"
                         )
                         break
                 else:
                     edge_gap_hits = 0
 
-                if bar_diff < 1.2:
+                if bar_diff < 0.8:
                     stuck_count += 1
-                    if stuck_count >= 2:
-                        self.log_tech(f"[THANH RỒNG] Thanh rồng không dịch chuyển thêm ({stuck_count}/2) -> Đổi chiều quét.")
+                    if stuck_count >= 3:
+                        self.log(f"[THANH RỒNG] Thanh rồng không dịch chuyển thêm ({stuck_count}/3) -> Đổi chiều quét.")
                         break
                 else:
                     stuck_count = 0
