@@ -206,3 +206,80 @@ def pick_point_overlay(
         overlay.bind("<Escape>", lambda _e: close())
 
     parent_root.after(200, _open)
+
+
+def capture_region_from_bgr(
+    parent_root: tk.Tk,
+    bgr_img: np.ndarray,
+    save_path: Path,
+    prompt_text: str = "Kéo chuột khoanh gọn thẻ rồng từ khung hình ADB (Nhấn ESC để hủy)",
+    on_saved: Optional[Callable[[Path], None]] = None,
+) -> None:
+    """Hiển thị ảnh chụp trực tiếp từ ADB (1280x720) để khoanh mẫu chuẩn 1:1 không lệch tỷ lệ Windows."""
+    if bgr_img is None or bgr_img.size == 0:
+        return
+    h, w = bgr_img.shape[:2]
+    max_w, max_h = 960, 560
+    disp_scale = min(1.0, max_w / max(1, w), max_h / max(1, h))
+    dw, dh = max(200, int(round(w * disp_scale))), max(150, int(round(h * disp_scale)))
+
+    rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
+    pil_disp = Image.fromarray(rgb).resize((dw, dh), Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS)
+
+    win = tk.Toplevel(parent_root)
+    win.title("Chụp mẫu trực tiếp từ ADB (Chuẩn 1:1)")
+    win.attributes("-topmost", True)
+    win.resizable(False, False)
+    win.configure(bg="#090B10")
+
+    hdr = tk.Label(
+        win,
+        text=f"{prompt_text}  ({w}×{h})",
+        bg="#0f172a",
+        fg="#38bdf8",
+        font=("Segoe UI", 10, "bold"),
+        pady=8,
+    )
+    hdr.pack(fill=tk.X)
+
+    tk_img = ImageTk.PhotoImage(pil_disp)
+    canvas = tk.Canvas(win, width=dw, height=dh, highlightthickness=0, cursor="cross", bg="#090B10")
+    canvas.pack()
+    canvas.create_image(0, 0, anchor=tk.NW, image=tk_img)
+    canvas.image = tk_img
+
+    state = {"x0": 0, "y0": 0, "rect": None}
+
+    def close() -> None:
+        win.destroy()
+
+    def on_press(event: tk.Event) -> None:
+        state["x0"], state["y0"] = event.x, event.y
+        if state["rect"] is not None:
+            canvas.delete(state["rect"])
+        state["rect"] = canvas.create_rectangle(
+            event.x, event.y, event.x, event.y, outline="#10b981", width=2
+        )
+
+    def on_drag(event: tk.Event) -> None:
+        if state["rect"] is not None:
+            canvas.coords(state["rect"], state["x0"], state["y0"], event.x, event.y)
+
+    def on_release(event: tk.Event) -> None:
+        x1, x2 = sorted([max(0, min(dw, state["x0"])), max(0, min(dw, event.x))])
+        y1, y2 = sorted([max(0, min(dh, state["y0"])), max(0, min(dh, event.y))])
+        close()
+        if (x2 - x1) >= 8 and (y2 - y1) >= 8:
+            ox1 = max(0, min(w - 1, int(round(x1 / disp_scale))))
+            oy1 = max(0, min(h - 1, int(round(y1 / disp_scale))))
+            ox2 = max(ox1 + 4, min(w, int(round(x2 / disp_scale))))
+            oy2 = max(oy1 + 4, min(h, int(round(y2 / disp_scale))))
+            cropped = bgr_img[oy1:oy2, ox1:ox2]
+            if imwrite_unicode(save_path, cropped) and on_saved:
+                on_saved(save_path)
+
+    canvas.bind("<ButtonPress-1>", on_press)
+    canvas.bind("<B1-Motion>", on_drag)
+    canvas.bind("<ButtonRelease-1>", on_release)
+    win.bind("<Escape>", lambda _e: close())
+    win.focus_force()

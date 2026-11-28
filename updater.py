@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
-CURRENT_VERSION = "14.12"
+CURRENT_VERSION = "15.0"
 
 DEFAULT_MANIFEST_URL = "https://github.com/LongDT-05/dragon_tool/releases/latest/download/version.json"
 
@@ -109,20 +108,8 @@ def download_and_prepare_update(
     Tải gói cập nhật (Full hoặc Patch siêu nhẹ), giải nén, kiểm tra tính toàn vẹn
     và tạo script apply_update.bat (tuyệt đối KHÔNG đụng config.json, profiles/ & templates rồng).
     """
-    tmp_root = Path(tempfile.mkdtemp(prefix="DaoRong_tool_update_"))
-    try:
-        return _stage_update(tmp_root, download_url, app_dir, progress_cb)
-    except Exception:
-        shutil.rmtree(tmp_root, ignore_errors=True)
-        raise
-
-
-def _stage_update(
-    tmp_root: Path,
-    download_url: str,
-    app_dir: Path,
-    progress_cb: Optional[Callable[[float, str], None]],
-) -> Path:
+    tmp_root = Path(tempfile.gettempdir()) / "DaoRong_tool_update"
+    tmp_root.mkdir(parents=True, exist_ok=True)
     zip_file = tmp_root / "update.zip"
     extract_dir = tmp_root / "extracted"
 
@@ -152,7 +139,10 @@ def _stage_update(
     if progress_cb:
         progress_cb(0.90, "Đang giải nén và kiểm tra gói cập nhật...")
 
-    extract_dir.mkdir()
+    if extract_dir.exists():
+        import shutil
+        shutil.rmtree(extract_dir, ignore_errors=True)
+    extract_dir.mkdir(parents=True, exist_ok=True)
 
     with zipfile.ZipFile(zip_file, "r") as zf:
         zf.extractall(extract_dir)
